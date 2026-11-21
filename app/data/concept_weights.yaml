@@ -1,0 +1,142 @@
+# GoldSight concept weights — edit freely, restart the backend to apply.
+# Weight = base contribution of a concept before strength scaling and recency decay.
+# Category caps stop one indicator family from dominating the confluence score.
+
+settings:
+  recency_bars: 24
+  min_recency: 0.2
+  score_buy_threshold: 0.18
+  score_sell_threshold: -0.18
+  min_grade_a_categories: 3
+  min_aplus_categories: 4
+  min_rr: 1.5
+  choppy_regimes: [ranging, volatile, neutral]
+  max_event_risk: 70
+  max_atr_pct: 3.5
+  max_spread_atr_ratio: 0.25
+  ml_blend: 0.35
+
+category_caps:
+  structure: 3.2
+  smc: 3.6
+  classic: 2.4
+  price_action: 1.8
+  mtf: 3.0
+  macro: 2.2
+  advanced: 1.4
+
+weights:
+  # structure
+  swing_high: 0.3
+  swing_low: 0.3
+  trend: 1.3
+  bos: 1.3
+  choch: 1.6
+  mss: 1.8
+  internal_structure: 0.6
+  external_structure: 1.0
+  # smart money / ICT
+  fvg: 1.4
+  ifvg: 1.5
+  order_block: 1.5
+  breaker_block: 1.1
+  mitigation_block: 0.8
+  equal_highs: 0.7
+  equal_lows: 0.7
+  liquidity_sweep: 1.6
+  displacement: 1.0
+  premium_discount: 1.2
+  ote: 1.0
+  killzone: 0.5
+  power_of_three: 0.8
+  judas_swing: 0.9
+  dealing_range: 0.5
+  daily_open: 0.3
+  midnight_open: 0.3
+  true_day_open: 0.3
+  session_high: 0.4
+  session_low: 0.4
+  pdh: 0.5
+  pdl: 0.5
+  pwh: 0.6
+  pwl: 0.6
+  smt_divergence: 1.2
+  # classic
+  sr_zone: 0.9
+  supply_demand: 0.8
+  trendline: 0.8
+  channel: 0.7
+  breakout: 1.1
+  retest: 0.9
+  ema_cross: 1.0
+  price_vs_ema: 0.7
+  rsi_signal: 0.4
+  rsi_divergence: 1.0
+  macd_cross: 0.7
+  macd_divergence: 0.9
+  stochastic: 0.3
+  bollinger_squeeze: 0.4
+  bollinger_expansion: 0.6
+  atr_volatility: 0.2
+  adx_trend_strength: 0.6
+  fibonacci: 0.6
+  pivot_points: 0.5
+  vwap: 0.6
+  anchored_vwap: 0.7
+  volume_profile: 0.6
+  ichimoku: 0.6
+  market_regime: 1.1
+  # price action
+  engulfing: 0.7
+  pin_bar: 0.7
+  doji: 0.2
+  morning_star: 0.9
+  evening_star: 0.9
+  inside_bar: 0.5
+  outside_bar: 0.5
+  three_soldiers: 0.8
+  three_crows: 0.8
+  double_top: 1.0
+  double_bottom: 1.0
+  head_shoulders: 1.1
+  inverse_head_shoulders: 1.1
+  triangle: 0.7
+  wedge: 0.7
+  flag: 0.7
+  range_breakout: 0.9
+  # multi-timeframe
+  mtf_bias: 1.8
+  htf_veto: 2.0
+  htf_level: 0.8
+  ltf_entry_confirmation: 1.0
+  # macro / sentiment
+  dxy_correlation: 1.1
+  us10y_correlation: 1.0
+  real_yield_proxy: 0.9
+  risk_regime: 0.6
+  news_sentiment: 0.7
+  event_risk: 1.5
+  macro_regime: 1.2
+  # advanced (initial low weights; adjusted only after ablation evidence)
+  wyckoff_phase: 0.00
+  wyckoff_spring: 0.35
+  wyckoff_utad: 0.35
+  wyckoff_sos: 0.40
+  wyckoff_breakdown: 0.35
+  elliott_count: 0.10
+  market_profile: 0.25
+  naked_poc: 0.20
+  value_acceptance: 0.25
+  initial_balance: 0.20
+  order_flow_delta: 0.10
+  volume_spike: 0.35
+  absorption: 0.45
+  exhaustion: 0.00
+  harmonic_pattern: 0.10
+  zone_quality: 0.45
+  false_breakout: 0.00
+  breakout_retest: 0.25
+  volatility_squeeze: 0.15
+  nr7: 0.15
+  inside_bar_cluster: 0.10
+  session_statistics: 0.20
