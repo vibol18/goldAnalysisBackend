@@ -5,11 +5,12 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
 from app import config
+from app.services import auth
 from app.services import chat, data, db, news, risk as risk_service, stats as stats_service
 from app.services.backtest import run_backtest
 
@@ -102,11 +103,12 @@ def risk_daily() -> dict[str, Any]:
 
 
 @router.get("/journal")
-def journal_list(limit: int = 200) -> dict[str, Any]:
+def journal_list(limit: int = 200, user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
     """Trade journal; resolved signals are imported automatically on read."""
+    uid = (user or {}).get("id")
     risk_service.sync_journal()
     return {
-        "trades": db.list_journal(min(limit, 1000)),
+        "trades": db.list_journal(min(limit, 1000), user_id=uid),
         "daily": risk_service.daily_status(),
         "disclaimer": (
             "Educational analysis only. Not financial advice. Signals can be wrong. "
@@ -116,21 +118,21 @@ def journal_list(limit: int = 200) -> dict[str, Any]:
 
 
 @router.post("/journal")
-def journal_create(body: dict[str, Any]) -> dict[str, Any]:
+def journal_create(body: dict[str, Any], user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
     """Log a manual trade in the journal."""
     try:
         result_pct = body.get("result_pct")
         if result_pct is not None:
             result_pct = float(result_pct)
-        entry_id = db.save_journal_entry({**body, "result_pct": result_pct})
+        entry_id = db.save_journal_entry({**body, "result_pct": result_pct}, user_id=(user or {}).get("id"))
     except (TypeError, ValueError) as exc:
         raise HTTPException(400, f"invalid journal entry: {exc}") from exc
     return {"id": entry_id, "status": "saved"}
 
 
 @router.delete("/journal/{entry_id}")
-def journal_delete(entry_id: int) -> dict[str, Any]:
-    return {"deleted": db.delete_journal_entry(entry_id)}
+def journal_delete(entry_id: int, user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
+    return {"deleted": db.delete_journal_entry(entry_id, user_id=(user or {}).get("id"))}
 
 
 # ---------------------------------------------------------------------------
@@ -230,23 +232,23 @@ def _build_snapshot() -> dict[str, Any]:
 
 
 @router.get("/chat/history")
-def chat_history() -> dict[str, Any]:
+def chat_history(user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
     """Persisted chat messages + provider configuration status."""
     return {
-        "messages": db.list_chat(limit=200),
+        "messages": db.list_chat(limit=200, user_id=(user or {}).get("id")),
         "llm_configured": config.llm_configured(),
         "provider": config.LLM_PROVIDER if config.llm_configured() else None,
     }
 
 
 @router.delete("/chat/history")
-def chat_clear() -> dict[str, str]:
-    db.clear_chat()
+def chat_clear(user: dict | None = Depends(auth.optional_user)) -> dict[str, str]:
+    db.clear_chat(user_id=(user or {}).get("id"))
     return {"status": "cleared"}
 
 
 @router.post("/chat")
-async def chat_post(body: dict[str, Any]) -> StreamingResponse:
+async def chat_post(body: dict[str, Any], user: dict | None = Depends(auth.optional_user)) -> StreamingResponse:
     """Stream an assistant reply (SSE) with live context injected."""
     message = (body.get("message") or "").strip()
     if not message:
@@ -254,9 +256,10 @@ async def chat_post(body: dict[str, Any]) -> StreamingResponse:
     if len(message) > 4000:
         raise HTTPException(400, "message too long (max 4000 chars)")
 
-    history = body.get("history") or db.list_chat(limit=20)
+    uid = (user or {}).get("id")
+    history = db.list_chat(limit=20, user_id=uid)
     snapshot = await run_in_threadpool(_build_snapshot)
-    db.save_chat("user", message)
+    db.save_chat("user", message, user_id=uid)
 
     async def event_stream() -> AsyncIterator[str]:
         yield "event: meta\ndata: " + json.dumps(
@@ -277,7 +280,7 @@ async def chat_post(body: dict[str, Any]) -> StreamingResponse:
                     "live context I would have used:\n"
                     + json.dumps(snapshot, default=str, ensure_ascii=False)[:1500]
                 )
-                db.save_chat("assistant", fallback)
+                db.save_chat("assistant", fallback, user_id=uid)
                 yield "data: " + json.dumps({"delta": fallback}) + "\n\n"
                 yield "event: done\ndata: {}\n\n"
                 return
@@ -289,7 +292,7 @@ async def chat_post(body: dict[str, Any]) -> StreamingResponse:
             return
         full = "".join(parts)
         if full:
-            db.save_chat("assistant", full)
+            db.save_chat("assistant", full, user_id=uid)
         yield "event: done\ndata: {}\n\n"
 
     return StreamingResponse(

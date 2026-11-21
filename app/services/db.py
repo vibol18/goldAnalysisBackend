@@ -67,6 +67,57 @@ CREATE TABLE IF NOT EXISTS journal_entries (
     source TEXT NOT NULL DEFAULT 'signal',
     UNIQUE(signal_id, source)
 );
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    email_verified INTEGER NOT NULL DEFAULT 0,
+    totp_secret TEXT,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT,
+    password_changed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    refresh_hash TEXT NOT NULL UNIQUE,
+    family_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    ip TEXT,
+    user_agent TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS email_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS login_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    succeeded INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    user_id INTEGER,
+    action TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    ip TEXT
+);
 CREATE TABLE IF NOT EXISTS signal_outcomes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     signal_id INTEGER NOT NULL,
@@ -101,6 +152,15 @@ def get_conn() -> sqlite3.Connection:
         ):
             if column not in columns:
                 _conn.execute(f"ALTER TABLE signals ADD COLUMN {column} {declaration}")
+        existing = {r["name"] for r in _conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        for table in ("signals", "journal_entries", "chat_messages",
+                      "alerts", "alert_settings"):
+            if table not in existing:
+                continue
+            cols = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})")}
+            if "user_id" not in cols:
+                _conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER")
         _conn.commit()
     return _conn
 
@@ -180,33 +240,42 @@ def update_signal_outcome(signal_id: int, status: str, hit: str | None,
         conn.commit()
 
 
-def save_chat(role: str, content: str) -> int:
+def save_chat(role: str, content: str, user_id: int | None = None) -> int:
     """Persist one chat message; returns id."""
     with _lock:
         conn = get_conn()
         cur = conn.execute(
-            "INSERT INTO chat_messages (created_at, role, content) VALUES (?,?,?)",
-            (_now(), role, content),
+            "INSERT INTO chat_messages (created_at, role, content, user_id) VALUES (?,?,?,?)",
+            (_now(), role, content, user_id),
         )
         conn.commit()
         return int(cur.lastrowid)
 
 
-def list_chat(limit: int = 100) -> list[dict[str, Any]]:
+def list_chat(limit: int = 100, user_id: int | None = None) -> list[dict[str, Any]]:
     """Return recent chat messages oldest-first."""
     with _lock:
         conn = get_conn()
-        rows = conn.execute(
-            "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        if user_id is None:
+            rows = conn.execute(
+                "SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
     return [dict(r) for r in reversed(rows)]
 
 
-def clear_chat() -> None:
+def clear_chat(user_id: int | None = None) -> None:
     """Delete all chat history."""
     with _lock:
         conn = get_conn()
-        conn.execute("DELETE FROM chat_messages")
+        if user_id is None:
+            conn.execute("DELETE FROM chat_messages")
+        else:
+            conn.execute("DELETE FROM chat_messages WHERE user_id=?", (user_id,))
         conn.commit()
 
 
@@ -274,7 +343,7 @@ def ensure_journal_entry(signal: dict[str, Any]) -> bool:
         return True
 
 
-def save_journal_entry(entry: dict[str, Any]) -> int:
+def save_journal_entry(entry: dict[str, Any], user_id: int | None = None) -> int:
     """Store a manually logged trade and return its id."""
     with _lock:
         conn = get_conn()
@@ -282,8 +351,8 @@ def save_journal_entry(entry: dict[str, Any]) -> int:
             """INSERT INTO journal_entries
                (created_at, closed_at, symbol, timeframe, action, grade, entry,
                 stop_loss, take_profit, exit_price, result_pct, setup, session,
-                notes, screenshot, source)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'manual')""",
+                notes, screenshot, source, user_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'manual', ?)""",
             (
                 entry.get("created_at") or _now(), entry.get("closed_at") or _now(),
                 entry.get("symbol") or "XAU/USD", entry.get("timeframe") or "1h",
@@ -291,26 +360,36 @@ def save_journal_entry(entry: dict[str, Any]) -> int:
                 entry.get("entry"), entry.get("stop_loss"), entry.get("take_profit"),
                 entry.get("exit_price"), entry.get("result_pct"),
                 entry.get("setup"), entry.get("session"),
-                entry.get("notes") or "", entry.get("screenshot"),
+                entry.get("notes") or "", entry.get("screenshot"), user_id,
             ),
         )
         conn.commit()
         return int(cur.lastrowid)
 
 
-def list_journal(limit: int = 200) -> list[dict[str, Any]]:
+def list_journal(limit: int = 200, user_id: int | None = None) -> list[dict[str, Any]]:
     """Return journal trades newest-first."""
     with _lock:
         conn = get_conn()
-        rows = conn.execute(
-            "SELECT * FROM journal_entries ORDER BY id DESC LIMIT ?", (limit,)
-        ).fetchall()
+        if user_id is None:
+            rows = conn.execute(
+                "SELECT * FROM journal_entries ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM journal_entries WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
     return [dict(r) for r in rows]
 
 
-def delete_journal_entry(entry_id: int) -> bool:
+def delete_journal_entry(entry_id: int, user_id: int | None = None) -> bool:
     with _lock:
         conn = get_conn()
-        cur = conn.execute("DELETE FROM journal_entries WHERE id=?", (entry_id,))
+        if user_id is None:
+            cur = conn.execute("DELETE FROM journal_entries WHERE id=?", (entry_id,))
+        else:
+            cur = conn.execute("DELETE FROM journal_entries WHERE id=? AND user_id=?",
+                               (entry_id, user_id))
         conn.commit()
     return cur.rowcount > 0

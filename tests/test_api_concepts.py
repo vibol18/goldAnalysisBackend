@@ -70,8 +70,11 @@ def test_learn_and_events(client):
     assert learn["total"] >= 80
     assert any(c["type"] == "fvg" for c in learn["concepts"])
     assert client.get("/api/events").json()["events"] == []
+    client.get("/api/auth/csrf")
+    csrf = client.cookies.get("gs_csrf")
     saved = client.post("/api/events", json={"events": [
-        {"time": "2030-01-01T13:30:00Z", "impact": "high", "name": "NFP"}]})
+        {"time": "2030-01-01T13:30:00Z", "impact": "high", "name": "NFP"}]},
+        headers={"X-CSRF-Token": csrf or ""})
     assert saved.status_code == 200, saved.text
     assert client.get("/api/events").json()["events"][0]["name"] == "NFP"
 
