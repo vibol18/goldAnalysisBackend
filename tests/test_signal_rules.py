@@ -50,8 +50,12 @@ def test_signal_immutable_when_future_candles_change():
 
 
 def test_storage_persists_signal_time_and_grade(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "signals.db")
-    monkeypatch.setattr(db, "_conn", None)
+    from app import config
+    url = f"sqlite:///{tmp_path / 'signals.db'}"
+    monkeypatch.setattr(config, "DATABASE_URL", url)
+    monkeypatch.setattr(db, "engine", db.create_database_engine(url))
+    monkeypatch.setattr(db, "_initialized", False)
+    db.init_db()
     sig = generate_signal(closed_frame(make_df()), "1h", train_model=False)
     payload = sig.to_dict()
     payload["id"] = db.save_signal(payload)

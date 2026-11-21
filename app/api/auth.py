@@ -69,15 +69,16 @@ class VerifyIn(StrictModel):
 
 
 def _set_cookies(response: Response, tokens: dict[str, str]) -> None:
-    secure = config.PRODUCTION
+    secure = config.COOKIE_SECURE
+    samesite = config.COOKIE_SAMESITE
     response.set_cookie(auth.ACCESS_COOKIE, tokens["access_token"], httponly=True,
-                        secure=secure, samesite="lax", path="/",
+                        secure=secure, samesite=samesite, path="/",
                         max_age=int(config.ACCESS_TOKEN_MINUTES) * 60)
     response.set_cookie(auth.REFRESH_COOKIE, tokens["refresh_token"], httponly=True,
-                        secure=secure, samesite="lax", path="/",
+                        secure=secure, samesite=samesite, path="/",
                         max_age=int(config.REFRESH_TOKEN_DAYS) * 86400)
     response.set_cookie(auth.CSRF_COOKIE, tokens["csrf_token"], httponly=False,
-                        secure=secure, samesite="lax", path="/",
+                        secure=secure, samesite=samesite, path="/",
                         max_age=int(config.REFRESH_TOKEN_DAYS) * 86400)
 
 
@@ -91,7 +92,8 @@ def csrf_cookie(response: Response) -> dict[str, str]:
     """Issue the double-submit CSRF cookie. Safe and unauthenticated."""
     token = secrets.token_urlsafe(32)
     response.set_cookie(auth.CSRF_COOKIE, token, httponly=False,
-                        secure=config.PRODUCTION, samesite="lax", path="/")
+                        secure=config.COOKIE_SECURE,
+                        samesite=config.COOKIE_SAMESITE, path="/")
     return {"status": "ok"}
 
 
@@ -187,9 +189,9 @@ def totp_setup(user: dict = Depends(auth.current_user)) -> dict[str, str]:
         conn.execute("UPDATE email_tokens SET used=1 WHERE user_id=? AND kind='totp_setup'",
                      (user["id"],))
         conn.execute(
-            """INSERT INTO email_tokens (user_id, token_hash, kind, expires_at, created_at)
-               VALUES (?,?, 'totp_setup', ?, ?)""",
-            (user["id"], auth._hash_token(secret),
+            """INSERT INTO email_tokens (user_id, token_hash, kind, expires_at, used, created_at)
+               VALUES (?,?, 'totp_setup', ?, 0, ?)""",
+            (user["id"], secret,
              auth._iso(auth._now() + timedelta(minutes=15)),
              auth._iso(auth._now())),
         )
@@ -200,7 +202,7 @@ def totp_setup(user: dict = Depends(auth.current_user)) -> dict[str, str]:
 
 @router.post("/2fa/enable")
 def totp_enable(body: CodeIn, request: Request,
-                user: dict = Depends(auth.current_user)) -> dict[str, str]:
+                user: dict = Depends(auth.current_user)) -> dict[str, Any]:
     with db._lock:
         conn = db.get_conn()
         row = conn.execute(

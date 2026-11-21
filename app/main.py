@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -15,8 +15,8 @@ from fastapi.responses import JSONResponse
 from app import config
 from app.api import alerts as alerts_api
 from app.api import auth as auth_api
-from app.api import chart, concepts, intelligence, market, misc, signals, stream
-from app.services import auth, db, ratelimit, streaming
+from app.api import chart, concepts, intelligence, market, misc, signals, stream, telegram
+from app.services import auth, data, db, ratelimit, streaming, telegram_client, telegram_delivery
 from app.services import alerts as alert_service
 
 config.assert_production_secrets()
@@ -37,9 +37,11 @@ class SecretRedactingFilter(logging.Filter):
         for pattern in self.PATTERNS:
             message = pattern.sub(
                 lambda m: (m.group(1) if m.lastindex else "") + "***REDACTED***", message)
-        for name in ("TELEGRAM_BOT_TOKEN", "JWT_SECRET", "FIELD_ENCRYPTION_KEY",
-                     "LLM_API_KEY", "TWELVE_DATA_API_KEY", "SMTP_PASSWORD"):
-            value = os.getenv(name, "").strip()
+        for value in (
+            config.TELEGRAM_BOT_TOKEN, config.JWT_SECRET, config.FIELD_ENCRYPTION_KEY,
+            config.LLM_API_KEY, config.TWELVE_DATA_API_KEY, config.SMTP_PASSWORD,
+        ):
+            value = value.strip()
             if len(value) >= 6:
                 message = message.replace(value, "***REDACTED***")
         record.msg = message
@@ -72,15 +74,22 @@ CSRF_EXEMPT = {
     "/api/auth/verify-email",
 }
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
-EXPENSIVE_PATHS = ("/api/backtest", "/api/intelligence/model", "/api/market/refresh")
+EXPENSIVE_PATHS = (
+    "/api/backtest", "/api/stats/results", "/api/intelligence/model",
+    "/api/market/refresh",
+)
+_EXPENSIVE_REQUEST_LOCK = threading.Lock()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ANN201
     """Initialize storage, the alert scanner and the shared market stream."""
     db.init_db()
+    await telegram_client.client.start()
+    await telegram_client.queue.start()
+    await telegram_delivery.configure_transport()
     await streaming.start_streaming()
-    scanner = asyncio.create_task(alert_service.scanner_loop())
+    scanner = asyncio.create_task(alert_service.scanner_loop(), name="goldsight-alert-scanner")
     try:
         yield
     finally:
@@ -90,6 +99,9 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
         except asyncio.CancelledError:
             pass
         await streaming.stop_streaming()
+        await telegram_delivery.stop()
+        await telegram_client.client.stop()
+        db.close_db()
 
 
 app = FastAPI(
@@ -105,12 +117,12 @@ app = FastAPI(
 if config.PRODUCTION:
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts={u.split("//")[-1].split(":")[0] for u in config.ALLOWED_ORIGINS} | {"localhost"},
+        allowed_hosts=list(config.TRUSTED_HOSTS),
     )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(config.ALLOWED_ORIGINS),
+    allow_origins=list(config.CORS_ORIGINS),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-CSRF-Token", "X-Requested-With"],
@@ -121,6 +133,8 @@ app.add_middleware(
 async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method
+    is_webhook = path.startswith("/api/telegram/webhook/")
+    expensive = any(path.startswith(p) for p in EXPENSIVE_PATHS)
     ip = auth.client_ip(request)
     try:
         if path.startswith("/api/auth/login") or path.startswith("/api/auth/signup"):
@@ -130,19 +144,29 @@ async def security_middleware(request: Request, call_next):
         elif path.startswith("/api/chat"):
             ratelimit.check(ratelimit.ip_key("chat", ip),
                             int(config.CHAT_RATE_LIMIT_PER_MINUTE))
-        elif any(path.startswith(p) for p in EXPENSIVE_PATHS):
+        elif expensive:
             ratelimit.check(ratelimit.ip_key("expensive", ip), 5)
-        else:
+        elif path != "/api/health" and not is_webhook:
             ratelimit.check(ratelimit.ip_key("api", ip),
                             int(config.RATE_LIMIT_PER_MINUTE))
-        if method in MUTATING and path.startswith("/api") and path not in CSRF_EXEMPT:
+        if (method in MUTATING and path.startswith("/api")
+                and path not in CSRF_EXEMPT and not is_webhook):
             auth.csrf_protect(request)
         if (config.PRODUCTION and path.startswith("/api")
-                and path not in PUBLIC_PATHS):
+                and path not in PUBLIC_PATHS and not is_webhook):
             auth.current_user(request)
     except HTTPException as exc:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-    response = await call_next(request)
+    if expensive and not _EXPENSIVE_REQUEST_LOCK.acquire(blocking=False):
+        return JSONResponse(
+            {"detail": "An expensive analysis is already running. Please retry shortly."},
+            status_code=429,
+        )
+    try:
+        response = await call_next(request)
+    finally:
+        if expensive:
+            _EXPENSIVE_REQUEST_LOCK.release()
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -168,6 +192,21 @@ app.include_router(chart.router)
 app.include_router(alerts_api.router)
 app.include_router(stream.router)
 app.include_router(intelligence.router)
+app.include_router(telegram.router)
+
+
+@app.get("/api/health")
+def health() -> dict[str, str | None]:
+    """Return cached service status without making network calls."""
+    snapshot = data.health_snapshot()
+    return {
+        "status": "ok",
+        "environment": config.ENV,
+        "database": config.DATABASE_TYPE,
+        "data_source_status": snapshot["status"],
+        "last_data_update": snapshot["last_updated"],
+        "version": config.APP_VERSION,
+    }
 
 
 @app.get("/api")

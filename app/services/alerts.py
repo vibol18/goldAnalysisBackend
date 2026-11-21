@@ -4,17 +4,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import smtplib
-import threading
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from typing import Any
 
 import httpx
+import pandas as pd
 
 from app import config
-from app.services import concept_context, data, db
+from app.services import concept_context, data, db, telegram_delivery
 from app.services.signal_engine import generate_signal
 
 logger = logging.getLogger(__name__)
@@ -40,10 +39,11 @@ SCAN_INTERVAL = 60.0
 KEEPALIVE_SECONDS = 20
 NARRATIVE_LIMIT = 240
 
-_lock = threading.Lock()
-_subscribers: set[asyncio.Queue] = set()
+_lock = db._lock
+_subscribers: dict[asyncio.Queue, int | None] = {}
 _dedupe: set[tuple[str, str, str]] = set()
 _DEDUPE_LIMIT = 1000
+_schema_ready = False
 
 
 def _remember(key: tuple[str, str, str]) -> None:
@@ -55,41 +55,20 @@ def _remember(key: tuple[str, str, str]) -> None:
 
 # --- environment-backed configuration -------------------------------------
 def telegram_configured() -> bool:
-    return bool(
-        os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-        and os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    )
+    return bool(config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID)
 
 
 def email_configured() -> bool:
-    return all(
-        os.getenv(name, "").strip()
-        for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_TO")
-    )
+    return all((config.SMTP_HOST, config.SMTP_USER, config.SMTP_PASSWORD, config.SMTP_TO))
 
 
 # --- lazy storage -----------------------------------------------------------
 def _ensure_tables() -> Any:
-    conn = db.get_conn()
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS alert_settings "
-        "(id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)"
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS alerts (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               time TEXT NOT NULL,
-               type TEXT NOT NULL,
-               timeframe TEXT NOT NULL,
-               action TEXT NOT NULL,
-               grade TEXT NOT NULL,
-               price REAL,
-               message TEXT NOT NULL,
-               channels TEXT NOT NULL
-           )"""
-    )
-    conn.commit()
-    return conn
+    global _schema_ready
+    if not _schema_ready:
+        db.init_db()
+        _schema_ready = True
+    return db.get_conn()
 
 
 def _now() -> str:
@@ -115,10 +94,11 @@ def _coerce_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     return {"timeframes": timeframes, "min_grade": min_grade, "channels": channels}
 
 
-def get_settings() -> dict[str, Any]:
+def get_settings(user_id: int | None = None) -> dict[str, Any]:
     with _lock:
         row = _ensure_tables().execute(
-            "SELECT payload FROM alert_settings WHERE id=1"
+            "SELECT payload FROM user_alert_settings WHERE user_id=?",
+            (user_id if user_id is not None else 0,),
         ).fetchone()
     stored = {}
     if row is not None:
@@ -133,18 +113,18 @@ def get_settings() -> dict[str, Any]:
     return result
 
 
-def save_settings(payload: dict[str, Any]) -> dict[str, Any]:
+def save_settings(payload: dict[str, Any], user_id: int | None = None) -> dict[str, Any]:
     clean = _coerce_settings(payload)
     persisted = {key: clean[key] for key in ("timeframes", "min_grade", "channels")}
     with _lock:
         conn = _ensure_tables()
         conn.execute(
-            "INSERT INTO alert_settings (id, payload) VALUES (1, ?) "
-            "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
-            (json.dumps(persisted),),
+            """INSERT INTO user_alert_settings (user_id, payload) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET payload=excluded.payload""",
+            (user_id if user_id is not None else 0, json.dumps(persisted)),
         )
         conn.commit()
-    return get_settings()
+    return get_settings(user_id)
 
 
 def _row_to_alert(row: Any) -> dict[str, Any]:
@@ -172,8 +152,8 @@ def store_alert(alert: dict[str, Any]) -> dict[str, Any]:
         conn = _ensure_tables()
         cur = conn.execute(
             """INSERT INTO alerts (time, type, timeframe, action, grade, price,
-                                   message, channels)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                                   message, channels, user_id)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (
                 timestamp,
                 str(alert.get("type") or "test"),
@@ -182,7 +162,7 @@ def store_alert(alert: dict[str, Any]) -> dict[str, Any]:
                 str(alert.get("grade") or ""),
                 alert.get("price"),
                 str(alert.get("message") or ""),
-                json.dumps(channels),
+                json.dumps(channels), alert.get("user_id"),
             ),
         )
         conn.commit()
@@ -192,35 +172,47 @@ def store_alert(alert: dict[str, Any]) -> dict[str, Any]:
     return stored
 
 
-def list_alerts(limit: int = 200) -> list[dict[str, Any]]:
+def list_alerts(limit: int = 200, user_id: int | None = None) -> list[dict[str, Any]]:
     with _lock:
-        rows = _ensure_tables().execute(
-            "SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)
-        ).fetchall()
+        conn = _ensure_tables()
+        if user_id is None:
+            rows = conn.execute(
+                "SELECT * FROM alerts ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM alerts WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, max(1, int(limit))),
+            ).fetchall()
     return [_row_to_alert(row) for row in rows]
 
 
-def clear_alerts() -> None:
+def clear_alerts(user_id: int | None = None) -> None:
     with _lock:
         conn = _ensure_tables()
-        conn.execute("DELETE FROM alerts")
+        if user_id is None:
+            conn.execute("DELETE FROM alerts")
+        else:
+            conn.execute("DELETE FROM alerts WHERE user_id=?", (user_id,))
         conn.commit()
 
 
 # --- asyncio pub/sub --------------------------------------------------------
-def subscribe() -> asyncio.Queue:
+def subscribe(user_id: int | None = None) -> asyncio.Queue:
     queue: asyncio.Queue = asyncio.Queue()
-    _subscribers.add(queue)
+    _subscribers[queue] = user_id
     return queue
 
 
 def unsubscribe(queue: asyncio.Queue) -> None:
-    _subscribers.discard(queue)
+    _subscribers.pop(queue, None)
 
 
 async def publish(alert: dict[str, Any]) -> dict[str, Any]:
     stored = store_alert(alert)
-    for queue in list(_subscribers):
+    for queue, owner in list(_subscribers.items()):
+        if owner is not None and stored.get("user_id") != owner:
+            continue
         try:
             queue.put_nowait(stored)
         except asyncio.QueueFull:  # pragma: no cover - unbounded queues
@@ -230,8 +222,8 @@ async def publish(alert: dict[str, Any]) -> dict[str, Any]:
 
 # --- notification delivery --------------------------------------------------
 def send_telegram(text: str) -> str:
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    token = config.TELEGRAM_BOT_TOKEN
+    chat_id = config.TELEGRAM_CHAT_ID
     if not (token and chat_id):
         return "Telegram not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)."
     try:
@@ -249,17 +241,14 @@ def send_telegram(text: str) -> str:
 
 
 def send_email(text: str) -> str:
-    host = os.getenv("SMTP_HOST", "").strip()
-    user = os.getenv("SMTP_USER", "").strip()
-    password = os.getenv("SMTP_PASSWORD", "").strip()
-    recipient = os.getenv("SMTP_TO", "").strip()
+    host = config.SMTP_HOST
+    user = config.SMTP_USER
+    password = config.SMTP_PASSWORD
+    recipient = config.SMTP_TO
     if not (host and user and password and recipient):
         return "Email not configured (set SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_TO)."
-    try:
-        port = int(os.getenv("SMTP_PORT", "587").strip() or 587)
-    except ValueError:
-        port = 587
-    sender = os.getenv("SMTP_FROM", "").strip() or user
+    port = config.SMTP_PORT
+    sender = config.SMTP_FROM or user
     message = EmailMessage()
     message["Subject"] = "GoldSight alert"
     message["From"] = sender
@@ -284,7 +273,7 @@ def _notification_text(alert: dict[str, Any]) -> str:
 
 
 async def notify(alert: dict[str, Any]) -> dict[str, str]:
-    settings = get_settings()
+    settings = get_settings(alert.get("user_id"))
     channels = settings["channels"]
     results: dict[str, str] = {}
     text = _notification_text(alert)
@@ -458,32 +447,75 @@ async def scan_once() -> list[dict[str, Any]]:
         except Exception as exc:  # noqa: BLE001
             logger.debug("alert scan: no %s context: %s", timeframe, exc)
             context = {}
+        progress_key = f"signal_scan:{timeframe}"
+        last_scanned = await asyncio.to_thread(db.get_app_setting, progress_key)
         try:
-            signal = await asyncio.to_thread(
-                generate_signal, closed, timeframe,
-                train_model=False, concept_context=context)
-            payload = signal.to_dict()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("alert scan: %s signal failed: %s", timeframe, exc)
-            continue
+            timestamps = pd.to_datetime(closed.index, utc=True)
+            if last_scanned:
+                marker = pd.to_datetime(last_scanned, utc=True)
+                positions = [
+                    index for index, timestamp in enumerate(timestamps)
+                    if timestamp > marker
+                ]
+            else:
+                positions = [len(closed) - 1]
+        except (TypeError, ValueError) as exc:
+            logger.warning("alert scan: invalid %s progress marker: %s", timeframe, exc)
+            positions = [len(closed) - 1]
 
-        action = str(payload.get("action") or "").upper()
-        grade = payload.get("grade")
-        if action in ("BUY", "SELL") and _grade_rank(grade) >= _grade_rank(
-                settings["min_grade"]):
-            key = ("signal", timeframe, signal_time)
-            if key not in _dedupe:
-                _remember(key)
-                alert = await publish({
-                    "type": "signal",
-                    "timeframe": timeframe,
-                    "action": action,
-                    "grade": str(grade),
-                    "price": _number(payload.get("price")),
-                    "message": _signal_message(payload, timeframe),
-                    "channels": list(enabled_channels),
-                })
-                created.append(alert)
+        latest_payload: dict[str, Any] | None = None
+        positions = positions[:config.SIGNAL_CATCHUP_BARS_PER_PASS]
+        for position in positions:
+            candle_frame = closed.iloc[:position + 1]
+            candle_time = pd.Timestamp(candle_frame.index[-1]).isoformat()
+            try:
+                signal = await asyncio.to_thread(
+                    generate_signal, candle_frame, timeframe,
+                    train_model=False, concept_context=context)
+                payload = signal.to_dict()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("alert scan: %s signal failed: %s", timeframe, exc)
+                break
+
+            payload["timeframe"] = timeframe
+            payload["signal_time"] = str(payload.get("signal_time") or candle_time)
+            action = str(payload.get("action") or "").upper()
+            grade = payload.get("grade")
+            same_side_open = any(
+                item.get("timeframe") == timeframe
+                and item.get("status") == "open"
+                and str(item.get("action") or "").upper() == action
+                for item in open_signals
+            )
+            if action in ("BUY", "SELL") and not same_side_open:
+                payload["id"] = await asyncio.to_thread(db.save_signal, payload)
+                open_signals.append({**payload, "status": "open"})
+                await asyncio.to_thread(telegram_delivery.dispatch_signal, payload)
+            await asyncio.to_thread(
+                db.set_app_setting, progress_key, payload["signal_time"])
+
+            if position == len(closed) - 1:
+                latest_payload = payload
+
+        if latest_payload is not None:
+            action = str(latest_payload.get("action") or "").upper()
+            grade = latest_payload.get("grade")
+            latest_time = str(latest_payload["signal_time"])
+            if action in ("BUY", "SELL") and _grade_rank(grade) >= _grade_rank(
+                    settings["min_grade"]):
+                key = ("signal", timeframe, latest_time)
+                if key not in _dedupe:
+                    _remember(key)
+                    alert = await publish({
+                        "type": "signal",
+                        "timeframe": timeframe,
+                        "action": action,
+                        "grade": str(grade),
+                        "price": _number(latest_payload.get("price")),
+                        "message": _signal_message(latest_payload, timeframe),
+                        "channels": list(enabled_channels),
+                    })
+                    created.append(alert)
 
         for stored_signal in open_signals:
             if (stored_signal.get("timeframe") != timeframe
@@ -491,6 +523,11 @@ async def scan_once() -> list[dict[str, Any]]:
                 continue
             if str(stored_signal.get("action") or "").upper() not in ("BUY", "SELL"):
                 continue
+            try:
+                if pd.Timestamp(stored_signal.get("signal_time")) >= pd.Timestamp(signal_time):
+                    continue
+            except (TypeError, ValueError):
+                pass
             kind, level = _detect_signal_event(stored_signal, high, low)
             if kind is None:
                 continue
@@ -509,6 +546,18 @@ async def scan_once() -> list[dict[str, Any]]:
                 "channels": list(enabled_channels),
             })
             created.append(alert)
+            hit = ""
+            if kind == "tp":
+                for index in (1, 2, 3):
+                    target = stored_signal.get(f"take_profit{index}")
+                    if target is not None and level is not None and abs(
+                        float(target) - float(level)
+                    ) < 0.01:
+                        hit = str(index)
+                        break
+            await asyncio.to_thread(
+                telegram_delivery.dispatch_result, kind, stored_signal, hit=hit,
+            )
     return created
 
 

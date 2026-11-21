@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app import config
-from app.services import data, db
+from app.services import data, db, telegram_delivery
 from app.services.signal_engine import closed_frame, evaluate_outcome, generate_signal
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,11 @@ def _refresh_outcomes(timeframe: str) -> None:
                 db.update_signal_outcome(
                     sig["id"], outcome["status"], outcome.get("hit"),
                     outcome.get("result_pct"))
+                if outcome.get("hit"):
+                    telegram_delivery.dispatch_result(
+                        "sl" if outcome["hit"] == "SL" else "tp",
+                        {**sig, "status": outcome["status"], "hit": outcome["hit"]},
+                    )
     except Exception as exc:  # noqa: BLE001
         logger.warning("outcome refresh failed: %s", exc)
     finally:
@@ -105,6 +110,7 @@ def current(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
             from app.services import stats as stats_service
             payload = stats_service.annotate_payload(payload)
             payload["id"] = db.save_signal(payload)
+            telegram_delivery.dispatch_signal(payload)
     return payload
 
 

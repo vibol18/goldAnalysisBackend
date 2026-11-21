@@ -5,9 +5,10 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import config
+from app.services import auth
 from app.concepts import DETECTORS, DETECTOR_CATEGORIES, detect_all, detect_all_dicts, load_families
 from app.concepts.base import CATEGORIES
 from app.services import concept_context, data, db
@@ -171,8 +172,10 @@ def weights() -> dict[str, Any]:
 
 
 @router.post("/weights/reload")
-def weights_reload() -> dict[str, Any]:
+def weights_reload(user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
     """Reload concept_weights.yaml after editing it."""
+    if user and user.get("role") != "admin":
+        raise HTTPException(403, "Administrator access required")
     return reload_weights()
 
 
@@ -182,8 +185,12 @@ def events_get() -> dict[str, Any]:
 
 
 @router.post("/events")
-def events_post(body: dict[str, Any]) -> dict[str, Any]:
+def events_post(body: dict[str, Any], user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
+    if user and user.get("role") != "admin":
+        raise HTTPException(403, "Only administrators may edit the shared calendar")
     events = body.get("events")
+    if not isinstance(events, list) or len(events) > 200:
+        raise HTTPException(400, "events must be a list of at most 200 items")
     try:
         cleaned = [concept_context.normalise_event(e) for e in events]
         cleaned.sort(key=lambda e: e["time"])

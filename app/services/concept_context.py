@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app import config
-from app.services import data
+from app.services import data, db
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +25,28 @@ MTF_FRAMES = (
 
 
 def load_events() -> list[dict[str, Any]]:
-    """Read the user-editable economic event calendar."""
+    """Read the persistent calendar, seeding it from the shipped file once."""
+    db.init_db()
+    stored = db.get_app_setting("economic_events")
+    if stored is not None:
+        try:
+            events = json.loads(stored)
+        except ValueError:
+            logger.exception("stored event calendar is invalid JSON")
+            return []
+        return events if isinstance(events, list) else []
+
     try:
         payload = json.loads(EVENTS_PATH.read_text(encoding="utf-8"))
         events = payload.get("events", []) if isinstance(payload, dict) else payload
-        return [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
+        clean_events = (
+            [e for e in events if isinstance(e, dict)]
+            if isinstance(events, list) else []
+        )
+        db.set_app_setting("economic_events", json.dumps(clean_events, ensure_ascii=False))
+        return clean_events
     except (OSError, ValueError) as exc:
-        logger.warning("could not read event calendar: %s", exc)
+        logger.warning("could not load and seed event calendar: %s", exc)
         return []
 
 
@@ -69,13 +84,11 @@ def normalise_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def save_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Persist the economic event calendar (validated list of dicts)."""
+    """Persist the economic event calendar in the shared database."""
     if not isinstance(events, list) or any(not isinstance(e, dict) for e in events):
         raise ValueError("events must be a list of objects")
-    EVENTS_PATH.write_text(
-        json.dumps({"events": events}, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    db.init_db()
+    db.set_app_setting("economic_events", json.dumps(events, ensure_ascii=False))
     return events
 
 

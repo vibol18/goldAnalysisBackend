@@ -5,7 +5,7 @@ import hashlib
 import logging
 import re
 import secrets
-import sqlite3
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -13,6 +13,7 @@ import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from fastapi import HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 
 from app import config
 from app.services import db
@@ -95,7 +96,7 @@ def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     return _row_to_user(row) if row else None
 
 
-def _get_auth_record(email: str) -> sqlite3.Row | None:
+def _get_auth_record(email: str) -> Mapping[str, Any] | None:
     with db._lock:
         return db.get_conn().execute(
             "SELECT * FROM users WHERE email=?", (validate_email(email),)
@@ -116,12 +117,13 @@ def create_user(email: str, username: str, password: str,
         try:
             cur = conn.execute(
                 """INSERT INTO users
-                   (email, username, password_hash, role, password_changed_at, created_at)
-                   VALUES (?,?,?,?,?,?)""",
+                   (email, username, password_hash, role, is_active, email_verified,
+                    failed_attempts, password_changed_at, created_at)
+                   VALUES (?,?,?,?,1,0,0,?,?)""",
                 (clean_email, username.strip(), hash_password(password),
                  role, now, now),
             )
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise ValueError("Could not create account") from exc
         conn.commit()
     return get_user_by_id(int(cur.lastrowid)) or {}
@@ -187,9 +189,10 @@ def create_session(user: dict[str, Any], ip: str = "", ua: str = "") -> dict[str
         conn = db.get_conn()
         cur = conn.execute(
             """INSERT INTO sessions
-               (user_id, token_hash, refresh_hash, family_id, created_at, expires_at, ip, user_agent)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (user["id"], "", "", family, _iso(now),
+               (user_id, token_hash, refresh_hash, family_id, created_at, expires_at,
+                revoked, ip, user_agent)
+               VALUES (?,?,?,?,?,?,0,?,?)""",
+            (user["id"], secrets.token_hex(32), secrets.token_hex(32), family, _iso(now),
              _iso(now + timedelta(days=int(config.REFRESH_TOKEN_DAYS))), ip[:64], ua[:200]),
         )
         conn.commit()
@@ -332,7 +335,7 @@ def create_email_token(user_id: int, kind: str) -> str:
     with db._lock:
         conn = db.get_conn()
         conn.execute(
-            "INSERT INTO email_tokens (user_id, token_hash, kind, expires_at, created_at) VALUES (?,?,?,?,?)",
+            "INSERT INTO email_tokens (user_id, token_hash, kind, expires_at, used, created_at) VALUES (?,?,?,?,0,?)",
             (user_id, _hash_token(token), kind,
              _iso(_now() + timedelta(hours=24)), _iso(_now())),
         )

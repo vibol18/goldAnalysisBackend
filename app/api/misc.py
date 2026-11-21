@@ -107,8 +107,13 @@ def journal_list(limit: int = 200, user: dict | None = Depends(auth.optional_use
     """Trade journal; resolved signals are imported automatically on read."""
     uid = (user or {}).get("id")
     risk_service.sync_journal()
+    trades = (
+        db.list_journal(min(limit, 1000))
+        if uid is None
+        else db.list_journal(min(limit, 1000), user_id=uid)
+    )
     return {
-        "trades": db.list_journal(min(limit, 1000), user_id=uid),
+        "trades": trades,
         "daily": risk_service.daily_status(),
         "disclaimer": (
             "Educational analysis only. Not financial advice. Signals can be wrong. "
@@ -248,8 +253,14 @@ def chat_clear(user: dict | None = Depends(auth.optional_user)) -> dict[str, str
 
 
 @router.post("/chat")
-async def chat_post(body: dict[str, Any], user: dict | None = Depends(auth.optional_user)) -> StreamingResponse:
+async def chat_post(
+    body: dict[str, Any],
+    request: Request,
+    user: dict | None = Depends(auth.optional_user),
+) -> StreamingResponse:
     """Stream an assistant reply (SSE) with live context injected."""
+    if not config.origin_is_allowed(request.headers.get("origin")):
+        raise HTTPException(403, "Origin not allowed")
     message = (body.get("message") or "").strip()
     if not message:
         raise HTTPException(400, "message is required")
@@ -339,7 +350,7 @@ def news_endpoint(force: bool = False) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Settings / health
+# Settings
 # ---------------------------------------------------------------------------
 @router.get("/settings")
 def settings() -> dict[str, Any]:
@@ -360,6 +371,3 @@ def settings() -> dict[str, Any]:
     }
 
 
-@router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "app": "GoldSight"}

@@ -49,7 +49,7 @@ def test_risk_endpoints(monkeypatch):
         "realised_pct": -3.5, "limit_pct": 3.0,
     })
     monkeypatch.setattr(risk, "sync_journal", lambda: {"created": 0})
-    monkeypatch.setattr(db, "list_journal", lambda limit=200: [])
+    monkeypatch.setattr(db, "list_journal", lambda limit=200, user_id=None: [])
     app = FastAPI()
     app.include_router(misc.router)
     with TestClient(app) as client:

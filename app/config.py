@@ -4,11 +4,73 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / ".env")
+load_dotenv(BASE_DIR / ".env", override=False)
+
+
+def _environment() -> str:
+    value = os.getenv("ENV")
+    if value is None:
+        value = "production" if os.getenv("PRODUCTION", "0").strip().lower() in {
+            "1", "true", "yes",
+        } else "development"
+    value = value.strip().lower()
+    if value not in {"development", "production"}:
+        raise ValueError("ENV must be either 'development' or 'production'")
+    return value
+
+
+ENV = _environment()
+PRODUCTION = ENV == "production"
+PORT = int(os.getenv("PORT", "8000"))
+APP_VERSION = os.getenv("APP_VERSION", "1.0.0").strip() or "1.0.0"
+TRUSTED_HOSTS = tuple(
+    host.strip() for host in os.getenv(
+        "TRUSTED_HOSTS",
+        ",".join(filter(None, (os.getenv("RENDER_EXTERNAL_HOSTNAME", ""), "*.onrender.com", "localhost"))),
+    ).split(",") if host.strip()
+)
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "none" if PRODUCTION else "lax").strip().lower()
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "1" if PRODUCTION else "0").strip().lower() in {
+    "1", "true", "yes",
+}
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
+if not PUBLIC_BASE_URL and PRODUCTION:
+    _render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    PUBLIC_BASE_URL = f"https://{_render_host}" if _render_host else ""
+ADMIN_CHAT_IDS = tuple(
+    int(value.strip()) for value in os.getenv("ADMIN_CHAT_IDS", "").split(",")
+    if value.strip().lstrip("-").isdigit()
+)
+TELEGRAM_LINK_CODE_TTL_SECONDS = max(60, int(os.getenv("TELEGRAM_LINK_CODE_TTL_SECONDS", "600")))
+TELEGRAM_DAILY_CAP = max(1, int(os.getenv("TELEGRAM_DAILY_CAP", "50")))
+TELEGRAM_RATE_PER_SECOND = max(1, int(os.getenv("TELEGRAM_RATE_PER_SECOND", "25")))
+TELEGRAM_PER_CHAT_SECONDS = max(0.0, float(os.getenv("TELEGRAM_PER_CHAT_SECONDS", "1")))
+TELEGRAM_CATCHUP_ENABLED = os.getenv("TELEGRAM_CATCHUP_ENABLED", "1").strip().lower() in {
+    "1", "true", "yes",
+}
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
+SMTP_TO = os.getenv("SMTP_TO", "").strip()
+STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
+STREAM_FORCE_REFRESH_SECONDS = float(os.getenv("STREAM_FORCE_REFRESH_SECONDS", "10"))
+STREAM_MACRO_INTERVAL_SECONDS = float(os.getenv("STREAM_MACRO_INTERVAL_SECONDS", "15"))
+STREAM_NEWS_INTERVAL_SECONDS = float(os.getenv("STREAM_NEWS_INTERVAL_SECONDS", "120"))
+STREAM_ANNOTATION_INTERVAL_SECONDS = float(os.getenv("STREAM_ANNOTATION_INTERVAL_SECONDS", "10"))
+STREAM_QUEUE_MAXSIZE = int(os.getenv("STREAM_QUEUE_MAXSIZE", "100"))
+DATA_CACHE_MAX_ENTRIES = int(os.getenv("DATA_CACHE_MAX_ENTRIES", "16"))
+DATA_CACHE_MAX_ROWS = int(os.getenv("DATA_CACHE_MAX_ROWS", "50000"))
+SIGNAL_CATCHUP_BARS_PER_PASS = max(1, int(os.getenv("SIGNAL_CATCHUP_BARS_PER_PASS", "1")))
 GOLD_TICKER = os.getenv("GOLD_TICKER", "XAUUSD=X")
 GOLD_FALLBACK_TICKER = os.getenv("GOLD_FALLBACK_TICKER", "GC=F")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "").strip()
@@ -62,22 +124,52 @@ ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-20250514"
 OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
 
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "goldsight.db"))
+
+
+def normalize_database_url(value: str | None = None, db_path: Path | None = None) -> str:
+    value = (value if value is not None else os.getenv("DATABASE_URL", "")).strip()
+    if not value:
+        local_path = db_path or DB_PATH
+        return "sqlite:///" + local_path.resolve().as_posix()
+    if value.startswith("postgres://"):
+        value = "postgresql://" + value[len("postgres://"):]
+    parsed = urlsplit(value)
+    if parsed.scheme in {"postgres", "postgresql"} and (
+        parsed.hostname or ""
+    ).lower().endswith(".render.com"):
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        query.setdefault("sslmode", "require")
+        value = urlunsplit(parsed._replace(query=urlencode(query)))
+    return value
+
+
+def parse_cors_origins(value: str | None = None, *, production: bool | None = None) -> tuple[str, ...]:
+    is_production = PRODUCTION if production is None else production
+    raw = value if value is not None else os.getenv("CORS_ORIGINS", "")
+    if value is None and not raw.strip():
+        raw = os.getenv("ALLOWED_ORIGINS", "")
+    if not raw.strip() and not is_production:
+        raw = "http://localhost:5173,http://127.0.0.1:5173"
+    return tuple(origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip())
+
+
+def origin_is_allowed(origin: str | None) -> bool:
+    return not origin or origin.rstrip("/") in CORS_ORIGINS
+
+
+DATABASE_URL = normalize_database_url()
+DATABASE_TYPE = "postgres" if urlsplit(DATABASE_URL).scheme.startswith("postgres") else "sqlite"
 DAILY_LOSS_LIMIT_PCT = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0"))
 
 # --- Security -----------------------------------------------------------------
-PRODUCTION = os.getenv("PRODUCTION", "0").strip().lower() in {"1", "true", "yes"}
 JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
 JWT_ISSUER = os.getenv("JWT_ISSUER", "goldsight").strip()
 JWT_AUDIENCE = os.getenv("JWT_AUDIENCE", "goldsight-app").strip()
 ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "15"))
 REFRESH_TOKEN_DAYS = int(os.getenv("REFRESH_TOKEN_DAYS", "7"))
 FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "").strip()
-ALLOWED_ORIGINS = tuple(
-    origin.strip() for origin in
-    os.getenv("ALLOWED_ORIGINS",
-              "http://localhost:5173,http://127.0.0.1:5173").split(",")
-    if origin.strip()
-)
+CORS_ORIGINS = parse_cors_origins()
+ALLOWED_ORIGINS = CORS_ORIGINS
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "120"))
 CHAT_RATE_LIMIT_PER_MINUTE = int(os.getenv("CHAT_RATE_LIMIT_PER_MINUTE", "10"))
 DEFAULT_SECRETS = {"", "CHANGE_ME_64_RANDOM_CHARS_MINIMUM",
@@ -91,10 +183,25 @@ def assert_production_secrets() -> None:
     problems: list[str] = []
     if JWT_SECRET in DEFAULT_SECRETS or len(JWT_SECRET) < 32:
         problems.append("JWT_SECRET must be a random value of at least 32 characters")
-    if FIELD_ENCRYPTION_KEY in DEFAULT_SECRETS or len(FIELD_ENCRYPTION_KEY) < 32:
-        problems.append("FIELD_ENCRYPTION_KEY must be a random value of at least 32 characters")
-    if "*" in ALLOWED_ORIGINS:
-        problems.append("ALLOWED_ORIGINS must not contain '*'")
+    if LLM_PROVIDER in {"anthropic", "openai"} and not LLM_API_KEY:
+        problems.append("LLM_API_KEY is required when LLM_PROVIDER is enabled")
+    if DATABASE_TYPE != "postgres":
+        problems.append("DATABASE_URL must point to PostgreSQL in production")
+    if "*" in CORS_ORIGINS:
+        problems.append("CORS_ORIGINS must not contain '*' when credentials are enabled")
+    if any("localhost" in origin or "127.0.0.1" in origin for origin in CORS_ORIGINS):
+        problems.append("CORS_ORIGINS must not use a local development origin in production")
+    if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
+        problems.append("COOKIE_SECURE must be enabled when COOKIE_SAMESITE is 'none'")
+    if TELEGRAM_BOT_TOKEN and not TELEGRAM_WEBHOOK_SECRET:
+        problems.append("TELEGRAM_WEBHOOK_SECRET is required when TELEGRAM_BOT_TOKEN is set")
+    if TELEGRAM_BOT_TOKEN and not PUBLIC_BASE_URL:
+        problems.append("PUBLIC_BASE_URL is required when TELEGRAM_BOT_TOKEN is set")
+    smtp_configured = bool(SMTP_HOST)
+    if smtp_configured and not all(
+        (SMTP_USER, SMTP_PASSWORD, SMTP_TO)
+    ):
+        problems.append("SMTP_USER, SMTP_PASSWORD, and SMTP_TO are required when SMTP_HOST is set")
     if problems:
         raise RuntimeError("Production configuration is invalid: " + "; ".join(problems))
 
@@ -105,3 +212,8 @@ def llm_configured() -> bool:
     if LLM_PROVIDER not in {"anthropic", "openai"}:
         return False
     return bool(LLM_API_KEY)
+
+
+def telegram_enabled() -> bool:
+    """Return True when a bot token is configured (bot otherwise disabled)."""
+    return bool(TELEGRAM_BOT_TOKEN)

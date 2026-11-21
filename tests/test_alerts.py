@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app import config
 from app.api import alerts as alerts_api
 from app.services import alerts, concept_context, data, db
 
@@ -37,6 +38,12 @@ class FakeSignal:
     payload = {
         "action": "BUY",
         "grade": "A+",
+        "confidence": 80.0,
+        "final_score": 0.7,
+        "rule_score": 0.6,
+        "ml_probability": None,
+        "risk_reward": 2.0,
+        "atr": 12.0,
         "price": 2345.6,
         "entry": 2340.0,
         "entry_zone": [2338.0, 2342.0],
@@ -56,14 +63,15 @@ class FakeSignal:
 def isolated(monkeypatch, tmp_path):
     for name in ENV_VARS:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "alerts.db")
-    monkeypatch.setattr(db, "_conn", None)
+    url = f"sqlite:///{tmp_path / 'alerts.db'}"
+    monkeypatch.setattr(config, "DATABASE_URL", url)
+    monkeypatch.setattr(db, "engine", db.create_database_engine(url))
+    monkeypatch.setattr(db, "_initialized", False)
     db.init_db()
-    temp_conn = db._conn
     alerts._dedupe.clear()
     alerts._subscribers.clear()
     yield
-    temp_conn.close()
+    db.close_db()
 
 
 @pytest.fixture()
@@ -156,6 +164,36 @@ async def test_scan_once_creates_signal_and_dedupes(stubbed):
 
 
 @pytest.mark.asyncio
+async def test_scanner_catches_up_closed_candles_without_duplicate_signals(
+    stubbed, monkeypatch,
+):
+    candles = stubbed
+    alerts.save_settings({"timeframes": ["1h"], "min_grade": "A", "channels": {}})
+    generated_at: list[str] = []
+
+    def generate(df, timeframe, **kwargs):
+        generated_at.append(df.index[-1].isoformat())
+        return FakeSignal()
+
+    monkeypatch.setattr(alerts, "generate_signal", generate)
+    await alerts.scan_once()
+    initial_count = len(db.list_signals())
+
+    last = candles.index[-1]
+    for offset in range(1, 4):
+        candles.loc[last + pd.Timedelta(minutes=15 * offset)] = candles.iloc[-1].values
+
+    await alerts.scan_once()
+    first_catch_up = generated_at[-1]
+    await alerts.scan_once()
+    second_catch_up = generated_at[-1]
+
+    assert first_catch_up < second_catch_up
+    assert len(generated_at) == 3
+    assert len(db.list_signals()) == initial_count
+
+
+@pytest.mark.asyncio
 async def test_stored_signal_touch_creates_tp_alert(stubbed):
     alerts.save_settings({"timeframes": ["1h"], "min_grade": "A", "channels": {}})
     db.save_signal({
@@ -190,6 +228,8 @@ async def test_publish_reaches_subscribers(stubbed):
 @pytest.mark.asyncio
 async def test_sse_stream_emits_alert_event(stubbed):
     class FakeRequest:
+        headers: dict[str, str] = {}
+
         async def is_disconnected(self) -> bool:
             return False
 
@@ -249,8 +289,8 @@ async def test_notifications_not_called_when_not_configured(stubbed, monkeypatch
 
 @pytest.mark.asyncio
 async def test_notification_text_contains_signal_details(stubbed, monkeypatch):
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat")
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(config, "TELEGRAM_CHAT_ID", "test-chat")
     settings = alerts.get_settings()
     settings["channels"]["telegram"] = True
     alerts.save_settings(settings)

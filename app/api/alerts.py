@@ -6,36 +6,47 @@ import json
 import logging
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.services import alerts as alert_service
+from app import config
+from app.services import alerts as alert_service, auth
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
 
+def _uid(user: object) -> int | None:
+    return user.get("id") if isinstance(user, dict) else None
+
+
 @router.get("/settings")
-def get_settings() -> dict[str, Any]:
-    return alert_service.get_settings()
+def get_settings(user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
+    return alert_service.get_settings(_uid(user))
 
 
 @router.post("/settings")
-def post_settings(body: dict[str, Any]) -> dict[str, Any]:
-    return alert_service.save_settings(body)
+def post_settings(body: dict[str, Any], user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
+    uid = _uid(user)
+    auth.audit(uid, "alert_settings_changed", "channels updated")
+    return alert_service.save_settings(body, uid)
 
 
 @router.get("")
-def list_alerts(limit: int = 200) -> dict[str, Any]:
-    rows = alert_service.list_alerts(limit)
+def list_alerts(limit: int = 200, user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
+    rows = alert_service.list_alerts(limit, _uid(user))
     return {"alerts": rows, "count": len(rows)}
 
 
 @router.get("/stream")
-async def stream(request: Request) -> StreamingResponse:
+async def stream(request: Request, user: dict | None = Depends(auth.optional_user)) -> StreamingResponse:
+    headers = getattr(request, "headers", {})
+    if not config.origin_is_allowed(headers.get("origin")):
+        raise HTTPException(403, "Origin not allowed")
+
     async def event_stream() -> AsyncIterator[str]:
-        queue = alert_service.subscribe()
+        queue = alert_service.subscribe(_uid(user))
         try:
             while True:
                 if await request.is_disconnected():
@@ -58,8 +69,9 @@ async def stream(request: Request) -> StreamingResponse:
 
 
 @router.post("/test")
-async def test_delivery() -> dict[str, Any]:
-    settings = alert_service.get_settings()
+async def test_delivery(request: Request, user: dict | None = Depends(auth.optional_user)) -> dict[str, Any]:
+    uid = _uid(user)
+    settings = alert_service.get_settings(uid)
     channels = [name for name, enabled in settings["channels"].items() if enabled]
     alert = await alert_service.publish({
         "type": "test",
@@ -68,7 +80,7 @@ async def test_delivery() -> dict[str, Any]:
         "grade": "n/a",
         "price": None,
         "message": "This is a GoldSight test alert. " + alert_service.DISCLAIMER,
-        "channels": channels,
+        "channels": channels, "user_id": uid,
     })
     results = await alert_service.notify(alert)
     sent = settings["channels"]["browser"] or any(

@@ -13,6 +13,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -61,7 +62,7 @@ def _make_model(seed: int = 42):
         objective="binary:logistic",
         eval_metric="logloss",
         random_state=seed,
-        n_jobs=2,
+        n_jobs=1,
         tree_method="hist",
     )
 
@@ -148,6 +149,21 @@ class DirectionModel:
             self._model = model
             self._feature_cols = list(X.columns)
             self._trained_at = time.time()
+            from app.services import db
+
+            brier = self._last_wf.brier if self._last_wf is not None else None
+            db.set_model_metadata("direction-model", {
+                "trained_at": datetime.now(timezone.utc).isoformat(),
+                "training_rows": len(X),
+                "feature_columns": self._feature_cols,
+                "horizon": config.ML_HORIZON,
+                "walk_forward_folds": len(self._last_wf.folds)
+                if self._last_wf is not None else 0,
+                "walk_forward_accuracy": self._last_wf.accuracy
+                if self._last_wf is not None else None,
+                "walk_forward_brier": brier if brier is not None and np.isfinite(brier)
+                else None,
+            })
             return self._last_wf
 
     def predict_proba(self, df: pd.DataFrame) -> float | None:

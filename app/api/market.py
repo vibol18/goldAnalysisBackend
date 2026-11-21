@@ -6,9 +6,10 @@ import math
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app import config
+from app.services import auth
 from app.services import data, db
 from app.services.indicators import add_all
 
@@ -145,7 +146,9 @@ def candles(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
 
 
 @router.post("/refresh")
-def refresh() -> dict[str, str]:
+def refresh(user: dict | None = Depends(auth.optional_user)) -> dict[str, str]:
     """Force-refresh the market data cache."""
+    if user and user.get("role") != "admin":
+        raise HTTPException(403, "Administrator access required")
     data.clear_cache()
     return {"status": "cache cleared"}

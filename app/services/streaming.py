@@ -5,7 +5,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,19 +18,12 @@ from app.services import chart_annotations, data, db, news
 logger = logging.getLogger(__name__)
 
 
-def _env_float(name: str, default: float, minimum: float) -> float:
-    try:
-        return max(minimum, float(os.getenv(name, str(default))))
-    except (TypeError, ValueError):
-        return default
-
-
-STREAM_INTERVAL_SECONDS = _env_float("STREAM_INTERVAL_SECONDS", 2.0, 1.0)
-FORCE_REFRESH_SECONDS = _env_float("STREAM_FORCE_REFRESH_SECONDS", 10.0, 1.0)
-MACRO_INTERVAL_SECONDS = _env_float("STREAM_MACRO_INTERVAL_SECONDS", 15.0, 1.0)
-NEWS_INTERVAL_SECONDS = _env_float("STREAM_NEWS_INTERVAL_SECONDS", 120.0, 1.0)
-ANNOTATION_INTERVAL_SECONDS = _env_float("STREAM_ANNOTATION_INTERVAL_SECONDS", 10.0, 1.0)
-QUEUE_MAXSIZE = int(_env_float("STREAM_QUEUE_MAXSIZE", 100.0, 1.0))
+STREAM_INTERVAL_SECONDS = max(1.0, config.STREAM_INTERVAL_SECONDS)
+FORCE_REFRESH_SECONDS = max(1.0, config.STREAM_FORCE_REFRESH_SECONDS)
+MACRO_INTERVAL_SECONDS = max(1.0, config.STREAM_MACRO_INTERVAL_SECONDS)
+NEWS_INTERVAL_SECONDS = max(1.0, config.STREAM_NEWS_INTERVAL_SECONDS)
+ANNOTATION_INTERVAL_SECONDS = max(1.0, config.STREAM_ANNOTATION_INTERVAL_SECONDS)
+QUEUE_MAXSIZE = max(1, config.STREAM_QUEUE_MAXSIZE)
 SUPPORTED_TIMEFRAMES = tuple(data.TIMEFRAMES)
 
 _TF_ALIASES = {

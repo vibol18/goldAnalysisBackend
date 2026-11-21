@@ -7,7 +7,9 @@ for stop/take-profit (conservative: stop checked first).
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 import numpy as np
@@ -20,7 +22,9 @@ from app.services.signal_engine import _rule_components, combine_rule_score
 
 logger = logging.getLogger(__name__)
 
-_cache: dict[str, dict[str, Any]] = {}
+_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_cache_lock = threading.Lock()
+_MAX_CACHED_BACKTESTS = 2
 
 
 def _side_statistics(trades: list[dict[str, Any]], side: str) -> dict[str, Any]:
@@ -105,8 +109,12 @@ def run_backtest(df: pd.DataFrame, dxy: pd.DataFrame | None = None,
     """Backtest the strategy; returns metrics, trades and equity curve."""
     years = years or config.BACKTEST_YEARS
     cache_key = f"{len(df)}|{years}|{float(df['Close'].iloc[-1]):.2f}"
-    if use_cache and cache_key in _cache:
-        return _cache[cache_key]
+    if use_cache:
+        with _cache_lock:
+            cached = _cache.get(cache_key)
+            if cached is not None:
+                _cache.move_to_end(cache_key)
+                return cached
 
     ind = add_all(df)
     if dxy is not None and len(dxy):
@@ -285,10 +293,15 @@ def run_backtest(df: pd.DataFrame, dxy: pd.DataFrame | None = None,
                  "Results include spread costs; slippage is not modelled." % years),
     }
     if use_cache:
-        _cache[cache_key] = result
+        with _cache_lock:
+            _cache[cache_key] = result
+            _cache.move_to_end(cache_key)
+            while len(_cache) > _MAX_CACHED_BACKTESTS:
+                _cache.popitem(last=False)
     return result
 
 
 def clear_backtest_cache() -> None:
     """Reset cached backtest results."""
-    _cache.clear()
+    with _cache_lock:
+        _cache.clear()

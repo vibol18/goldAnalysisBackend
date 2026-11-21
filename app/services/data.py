@@ -63,6 +63,8 @@ _fetch_locks: dict[str, threading.Lock] = {}
 _locks_guard = threading.Lock()
 _provider_cooldown: dict[tuple[str, str], tuple[float, str]] = {}
 _cooldown_seconds = 120.0
+MAX_CACHE_ENTRIES = max(1, config.DATA_CACHE_MAX_ENTRIES)
+MAX_CACHE_ROWS = max(1, config.DATA_CACHE_MAX_ROWS)
 PROVIDER_TIMEOUTS = {"twelvedata": 12.0, "yfinance": 5.0, "kraken-xaut": 8.0, "yahoo-chart": 14.0}
 
 
@@ -78,6 +80,50 @@ def _lock_for(key: str) -> threading.Lock:
 def _fresh(entry: CacheEntry | None, ttl: int, force: bool) -> bool:
     return (entry is not None and not force and not entry.stale
             and (time.time() - entry.fetched_at) < ttl)
+
+
+def _store_cache(key: str, entry: CacheEntry) -> CacheEntry:
+    if len(entry.df) > MAX_CACHE_ROWS:
+        entry = CacheEntry(
+            df=entry.df.iloc[-MAX_CACHE_ROWS:].copy(),
+            fetched_at=entry.fetched_at,
+            stale=entry.stale,
+            synthetic=entry.synthetic,
+            error=entry.error,
+            source=entry.source,
+        )
+    evicted: list[str] = []
+    with _cache_lock:
+        _cache[key] = entry
+        while len(_cache) > MAX_CACHE_ENTRIES:
+            oldest = min(
+                (cached_key for cached_key in _cache if cached_key != key),
+                key=lambda cached_key: _cache[cached_key].fetched_at,
+                default=None,
+            )
+            if oldest is None:
+                break
+            _cache.pop(oldest, None)
+            evicted.append(oldest)
+    if evicted:
+        with _locks_guard:
+            for cached_key in evicted:
+                _fetch_locks.pop(cached_key, None)
+    return entry
+
+
+def health_snapshot() -> dict[str, str | None]:
+    """Return cached market-source status without fetching external data."""
+    with _cache_lock:
+        entries = list(_cache.values())
+    if not entries:
+        return {"status": "unavailable", "last_updated": None}
+    latest = max(entries, key=lambda entry: entry.fetched_at)
+    if latest.df.empty:
+        status = "unavailable"
+    else:
+        status = "stale" if latest.stale else "live"
+    return {"status": status, "last_updated": latest.last_updated}
 
 
 def _fetch_with_timeout(provider: Any, ticker: str, timeframe: str,
@@ -157,9 +203,7 @@ def get_ohlcv(ticker: str, timeframe: str, force: bool = False) -> CacheEntry:
             entry = CacheEntry(df=_empty_frame(), fetched_at=time.time(), stale=True,
                                error="; ".join(errors) or "no live data source available")
 
-    with _cache_lock:
-        _cache[key] = entry
-    return entry
+    return _store_cache(key, entry)
 
 
 def refresh_realtime_candles() -> CacheEntry | None:
@@ -174,9 +218,7 @@ def refresh_realtime_candles() -> CacheEntry | None:
         try:
             df = _fetch_with_timeout(provider, config.GOLD_TICKER, "15m", 8.0)
             entry = CacheEntry(df=df, fetched_at=time.time(), source=provider.name)
-            with _cache_lock:
-                _cache[_key(config.GOLD_TICKER, "15m")] = entry
-            return entry
+            return _store_cache(_key(config.GOLD_TICKER, "15m"), entry)
         except Exception as exc:  # noqa: BLE001
             logger.debug("realtime refresh via %s failed: %s", provider.name, exc)
     return None
@@ -282,3 +324,6 @@ def clear_cache() -> None:
     """Drop all cached data (used by tests / settings refresh)."""
     with _cache_lock:
         _cache.clear()
+    with _locks_guard:
+        _fetch_locks.clear()
+        _provider_cooldown.clear()

@@ -11,6 +11,8 @@ httpx==0.28.1
 curl_cffi==0.17.0
 feedparser==6.0.11
 PyYAML==6.0.2
+SQLAlchemy==2.0.44
+alembic==1.17.2
 argon2-cffi==25.1.0
 PyJWT==2.15.1
 pyotp==2.12.1

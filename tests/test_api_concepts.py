@@ -6,8 +6,9 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from app import config
 from app.main import app
-from app.services import concept_context, data
+from app.services import concept_context, data, db
 
 
 def frame(n: int = 320) -> pd.DataFrame:
@@ -42,8 +43,13 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(data, "get_market_overview", lambda: {
         "gold": {}, "correlations": {"DXY": {"change_pct": -0.2}}, "meta": {}})
     monkeypatch.setattr(concept_context, "EVENTS_PATH", tmp_path / "events.json")
+    url = f"sqlite:///{tmp_path / 'concepts.db'}"
+    monkeypatch.setattr(config, "DATABASE_URL", url)
+    monkeypatch.setattr(db, "engine", db.create_database_engine(url))
+    monkeypatch.setattr(db, "_initialized", False)
     with TestClient(app) as c:
         yield c
+    db.close_db()
 
 
 def test_concepts_endpoint(client):

@@ -8,6 +8,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app import config
 from app.services import streaming
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,9 @@ async def sender_loop(websocket: Any, queue: asyncio.Queue,
 
 @router.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket) -> None:
+    if not config.origin_is_allowed(websocket.headers.get("origin")):
+        await websocket.close(code=1008, reason="Origin not allowed")
+        return
     await websocket.accept()
     queue = await streaming.HUB.subscribe("1h")
     sender_task = asyncio.create_task(
