@@ -11,7 +11,7 @@ from app import config
 from app.services import auth
 from app.concepts import DETECTORS, DETECTOR_CATEGORIES, detect_all, detect_all_dicts, load_families
 from app.concepts.base import CATEGORIES
-from app.services import concept_context, data, db
+from app.services import concept_context, data, db, price_service
 from app.services.confluence import confluence, load_weights, reload_weights
 from app.services.explanation import build_explanation
 
@@ -32,7 +32,7 @@ def _detect(timeframe: str, use_cache: bool = True) -> dict[str, Any]:
     key = f"{timeframe}|gold"
     if use_cache and key in _cache and now - _cache[key][0] < _CACHE_TTL:
         return _cache[key][1]
-    entry = data.get_ohlcv(config.GOLD_TICKER, timeframe)
+    entry = price_service.get_series(timeframe)
     if entry.df.empty:
         raise HTTPException(503, entry.error or "no live XAU/USD data available")
     context = concept_context.build_context(timeframe)
@@ -83,7 +83,7 @@ def confluence_endpoint(
     """Confluence score, graded signal and analyst explanation."""
     try:
         payload = _detect(timeframe)
-        entry = data.get_ohlcv(config.GOLD_TICKER, timeframe)
+        entry = price_service.get_series(timeframe)
         from app.concepts import detect_all
         context = concept_context.build_context(timeframe)
         concepts = detect_all(entry.df, context)
@@ -119,7 +119,7 @@ def concept_backtest_endpoint(
         from app.services.concept_backtest import (
             full_confluence_backtest, per_concept_performance,
         )
-        entry = data.get_ohlcv(config.GOLD_TICKER, "1D")
+        entry = price_service.get_series("1D")
         if entry.df.empty:
             raise HTTPException(503, entry.error or "no live XAU/USD data available")
         context = concept_context.build_context("1D")

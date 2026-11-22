@@ -62,6 +62,25 @@ SMTP_USER = os.getenv("SMTP_USER", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
 SMTP_TO = os.getenv("SMTP_TO", "").strip()
+# --- live price feed ---------------------------------------------------------
+DATA_SOURCE_PRIORITY = tuple(
+    value.strip().lower() for value in
+    os.getenv("DATA_SOURCE_PRIORITY", "mt5,oanda,twelve,rest").split(",")
+    if value.strip()
+)
+PRICE_BID_MODE = os.getenv("PRICE_BID_MODE", "bid").strip().lower()
+PRICE_FAILOVER_SECONDS = float(os.getenv("PRICE_FAILOVER_SECONDS", "10"))
+PRICE_DIVERGENCE_TOLERANCE_USD = float(os.getenv("PRICE_DIVERGENCE_TOLERANCE_USD", "2.0"))
+REQUIRE_BRIDGE_FOR_SIGNALS = os.getenv("REQUIRE_BRIDGE_FOR_SIGNALS", "0").strip().lower() in {"1", "true", "yes"}
+PRICE_LIVE_SECONDS = float(os.getenv("PRICE_LIVE_SECONDS", "5"))
+PRICE_DELAYED_SECONDS = float(os.getenv("PRICE_DELAYED_SECONDS", "30"))
+MARKET_TIMEZONE = os.getenv("MARKET_TIMEZONE", "America/New_York").strip() or "America/New_York"
+MARKET_CLOSE_HOUR = float(os.getenv("MARKET_CLOSE_HOUR", "17"))
+MARKET_OPEN_HOUR = float(os.getenv("MARKET_OPEN_HOUR", "17"))
+WATCHDOG_INTERVAL_SECONDS = float(os.getenv("WATCHDOG_INTERVAL_SECONDS", "5"))
+WATCHDOG_ALERT_SECONDS = float(os.getenv("WATCHDOG_ALERT_SECONDS", "120"))
+STREAM_TICK_THROTTLE_SECONDS = float(os.getenv("STREAM_TICK_THROTTLE_SECONDS", "0.5"))
+
 STREAM_INTERVAL_SECONDS = float(os.getenv("STREAM_INTERVAL_SECONDS", "2"))
 STREAM_FORCE_REFRESH_SECONDS = float(os.getenv("STREAM_FORCE_REFRESH_SECONDS", "10"))
 STREAM_MACRO_INTERVAL_SECONDS = float(os.getenv("STREAM_MACRO_INTERVAL_SECONDS", "15"))
@@ -104,6 +123,41 @@ ECONOMIC_CALENDAR_URL = os.getenv("ECONOMIC_CALENDAR_URL", "https://nfs.fairecon
 CALENDAR_TTL_SECONDS = int(os.getenv("CALENDAR_TTL_SECONDS", "3600"))
 CACHE_TTL_INTRADAY = int(os.getenv("CACHE_TTL_INTRADAY", "60"))
 CACHE_TTL_DAILY = int(os.getenv("CACHE_TTL_DAILY", "1800"))
+CANDLE_DISPLAY_TIMEZONE = os.getenv("CANDLE_DISPLAY_TIMEZONE", "Asia/Phnom_Penh").strip() or "Asia/Phnom_Penh"
+BROKER_SERVER_ANCHOR_OFFSET_SECONDS = int(
+    os.getenv("BROKER_SERVER_ANCHOR_OFFSET_SECONDS", "0")
+)
+DAILY_SESSION_ANCHOR = os.getenv("DAILY_SESSION_ANCHOR", "17:00_NEW_YORK").strip()
+OUTLIER_ATR_MULTIPLIER = float(os.getenv("OUTLIER_ATR_MULTIPLIER", "8"))
+DATA_SOURCE_PRIORITY = tuple(
+    value.strip().lower()
+    for value in os.getenv("DATA_SOURCE_PRIORITY", "mt5,twelvedata,oanda,rest,yfinance").split(",")
+    if value.strip()
+)
+CANDLE_PRICE_SIDE = os.getenv("CANDLE_PRICE_SIDE", "bid").strip().lower()
+if CANDLE_PRICE_SIDE not in {"bid", "ask", "mid"}:
+    CANDLE_PRICE_SIDE = "bid"
+OANDA_API_TOKEN = os.getenv("OANDA_API_TOKEN", "").strip()
+OANDA_API_BASE_URL = os.getenv(
+    "OANDA_API_BASE_URL", "https://api-fxpractice.oanda.com",
+).strip().rstrip("/")
+OANDA_GOLD_INSTRUMENT = os.getenv("OANDA_GOLD_INSTRUMENT", "XAU_USD").strip() or "XAU_USD"
+
+# --- MT5 bridge --------------------------------------------------------------
+BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY", "").strip()
+MT5_SYMBOL = os.getenv("MT5_SYMBOL", "XAUUSD").strip() or "XAUUSD"
+MT5_BROKER_NAME = os.getenv("MT5_BROKER_NAME", "").strip()
+BRIDGE_TICK_MAX_AGE_SECONDS = int(os.getenv("BRIDGE_TICK_MAX_AGE_SECONDS", "120"))
+BRIDGE_CANDLE_MAX_AGE_SECONDS = int(os.getenv("BRIDGE_CANDLE_MAX_AGE_SECONDS", "600"))
+BRIDGE_RATE_LIMIT_PER_MINUTE = int(os.getenv("BRIDGE_RATE_LIMIT_PER_MINUTE", "240"))
+BRIDGE_MAX_BODY_BYTES = int(os.getenv("BRIDGE_MAX_BODY_BYTES", str(2 * 1024 * 1024)))
+BRIDGE_MAX_CANDLES_PER_REQUEST = int(os.getenv("BRIDGE_MAX_CANDLES_PER_REQUEST", "2000"))
+BRIDGE_TIMEFRAMES = tuple(
+    value.strip() for value in os.getenv("BRIDGE_TIMEFRAMES", "M1,M15,H1,H4,D1").split(",")
+    if value.strip()
+)
+BRIDGE_SIGNAL_TIMEFRAMES = ("15m", "1h", "4h")
+MIN_CANDLES_FOR_DETECTION = max(200, int(os.getenv("MIN_CANDLES_FOR_DETECTION", "1000")))
 
 ML_HORIZON = int(os.getenv("ML_HORIZON", "6"))
 SIGNAL_BUY_THRESHOLD = float(os.getenv("SIGNAL_BUY_THRESHOLD", "0.22"))
@@ -197,6 +251,8 @@ def assert_production_secrets() -> None:
         problems.append("TELEGRAM_WEBHOOK_SECRET is required when TELEGRAM_BOT_TOKEN is set")
     if TELEGRAM_BOT_TOKEN and not PUBLIC_BASE_URL:
         problems.append("PUBLIC_BASE_URL is required when TELEGRAM_BOT_TOKEN is set")
+    if BRIDGE_API_KEY and len(BRIDGE_API_KEY) < 16:
+        problems.append("BRIDGE_API_KEY must be at least 16 characters")
     smtp_configured = bool(SMTP_HOST)
     if smtp_configured and not all(
         (SMTP_USER, SMTP_PASSWORD, SMTP_TO)

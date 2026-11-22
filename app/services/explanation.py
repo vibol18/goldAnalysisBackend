@@ -3,9 +3,33 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from app.services.confluence import ConfluenceResult
+
+
+def _age_bars(concept: Any, df: pd.DataFrame) -> int:
+    try:
+        ts = pd.Timestamp(concept.end_time)
+    except (TypeError, ValueError):
+        return 0
+    if pd.isna(ts):
+        return 0
+    index = pd.DatetimeIndex(df.index)
+    if index.tz is not None and ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    elif index.tz is None and ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    return max(0, len(index) - int(index.searchsorted(ts, side="right")))
+
+
+def _atr_value(df: pd.DataFrame) -> float:
+    high, low, close = df["High"], df["Low"], df["Close"]
+    tr = pd.concat([high - low, (high - close.shift(1)).abs(),
+                    (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    value = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
+    return value if np.isfinite(value) and value > 0 else max(abs(float(close.iloc[-1])) * 0.01, 1e-9)
 
 
 def money(value: float | None) -> str:
@@ -67,25 +91,46 @@ def build_explanation(concepts: list[Any], result: ConfluenceResult,
         else:
             event_bits.append(sweep.notes.strip().rstrip("."))
 
+    recency_limit = {"15m": 16, "1h": 8, "4h": 5, "1D": 3}.get(timeframe, 8)
     structure = _latest(concepts, {"choch", "mss", "bos"}) if action != "HOLD" else None
     if structure is not None:
         extra = " with displacement" if structure.type in ("mss", "choch") and (
             _latest(concepts, {"displacement"}) is not None) else ""
+        shape = ("higher highs and higher lows" if structure.direction == "bullish"
+                 else "lower highs and lower lows" if structure.direction == "bearish"
+                 else "no clear structure")
+        age = _age_bars(structure, df)
+        recency = "current" if age <= recency_limit else f"older ({age} bars ago)"
         event_bits.append(
-            f"a {structure.direction} {structure.type.upper()}{extra} confirmed the shift"
+            f"a {structure.direction} {structure.type.upper()} ({shape}){extra} "
+            f"confirmed the shift, {recency}"
         )
 
     zone = _latest(concepts, {"fvg", "order_block", "ifvg", "breaker_block"},
                    "bullish" if action == "BUY" else "bearish" if action == "SELL" else None)
     if zone is not None and zone.top is not None and zone.bottom is not None:
+        mid = (float(zone.top) + float(zone.bottom)) / 2.0
+        distance_atr = abs(mid - price) / _atr_value(df)
+        if distance_atr <= 0.5:
+            proximity = "entry zone (price is inside or within 0.5 ATR)"
+        else:
+            side = "below" if mid < price else "above"
+            proximity = f"target/retest zone {side} price, {distance_atr:.1f} ATR away"
+        aligned = zone.direction == bias_word
+        label = "aligns with" if aligned else f"conflicts with the {bias_word} setup"
         event_bits.append(
             f"a {zone.direction} {zone.type.replace('_', ' ')} at "
-            f"{money(zone.bottom)}–{money(zone.top)} aligns with the setup"
+            f"{money(zone.bottom)}–{money(zone.top)} is an {proximity} and {label}"
         )
 
     killzone = _latest(concepts, {"killzone"})
     if killzone is not None and result.killzone_active:
-        event_bits.append(f"inside the {killzone.meta.get('zone', 'active')} killzone")
+        raw_zone = str(killzone.meta.get("zone", "active")).lower()
+        zone_label = ("Asian range" if "asian" in raw_zone else
+                      "London" if "london" in raw_zone else
+                      "New York" if "new york" in raw_zone or "ny" in raw_zone
+                      else raw_zone.replace("_", " ").title())
+        event_bits.append(f"inside the configured {zone_label} session window")
 
     sentences = bias_bits + location_bits
     if event_bits:
@@ -104,12 +149,31 @@ def build_explanation(concepts: list[Any], result: ConfluenceResult,
     else:
         sentences.append("No tradeable setup: staying in HOLD.")
 
-    total_factors = len(result.agreeing) + len(result.disagreeing)
+    factors = result.factors or []
+    agreeing_factors = [f for f in factors if float(f.get("contribution", 0)) > 0.05]
+    disagreeing_factors = [f for f in factors if float(f.get("contribution", 0)) < -0.05]
+    total_factors = len(factors)
     sentences.append(
-        f"Confluence: {len(result.agreeing)} of {total_factors} factors agree. Grade {result.grade}."
+        f"Confluence: {len(agreeing_factors)} of {total_factors} factors agree. Grade {result.grade}."
     )
-    if result.disagreeing:
-        sentences.append(f"Against: {', '.join(result.disagreeing[:4])}.")
+    if agreeing_factors:
+        sentences.append(
+            "For: " + ", ".join(str(f.get("type", "?")) for f in agreeing_factors[:6]) + "."
+        )
+    if disagreeing_factors:
+        sentences.append(
+            "Against: " + ", ".join(str(f.get("type", "?")) for f in disagreeing_factors[:6]) + "."
+        )
+    expected = {"BUY": "bullish", "SELL": "bearish"}.get(action)
+    if expected:
+        conflicting = [f for f in factors
+                       if str(f.get("direction", "neutral")) not in ("neutral", expected)
+                       and abs(float(f.get("contribution", 0))) > 0.05]
+        if conflicting:
+            sentences.append(
+                f"Direction conflict: {', '.join(str(f.get('type')) for f in conflicting[:4])} "
+                f"point {'bullish' if expected == 'bearish' else 'bearish'} while the signal is {action}."
+            )
     if result.veto_reasons:
         sentences.append("HOLD because " + "; ".join(result.veto_reasons) + ".")
     sentences.append(result.invalidation)
@@ -126,6 +190,10 @@ def build_explanation(concepts: list[Any], result: ConfluenceResult,
         item = _latest(concepts, {key})
         if item is not None:
             reasons.append(f"{label}: {item.notes.strip().rstrip('.')}.")
+    for note in result.notes:
+        if note in result.veto_reasons:
+            continue
+        reasons.append(f"Adjustment: {note}.")
     for veto in result.veto_reasons:
         reasons.append(f"Veto: {veto}.")
     if not reasons:
@@ -136,7 +204,9 @@ def build_explanation(concepts: list[Any], result: ConfluenceResult,
             "type": f["type"],
             "label": f["type"].replace("_", " ").title(),
             "agree": f["contribution"] >= 0,
+            "direction": f.get("direction", "neutral"),
             "weight": f["weight"],
+            "contribution": round(float(f.get("contribution", 0)), 4),
             "detail": f["notes"],
             "category": f["category"],
         }
@@ -168,11 +238,14 @@ def build_explanation(concepts: list[Any], result: ConfluenceResult,
         "checklist": checklist,
         "why_not_trading": why_not_trading,
         "trade_plan": {
+            "direction": bias_word if action != "HOLD" else "unconfirmed",
             "entry_zone": list(result.entry_zone) if result.entry_zone else None,
-            "stop_loss": result.stop_loss,
-            "take_profit1": result.take_profit1,
-            "take_profit2": result.take_profit2,
-            "take_profit3": result.take_profit3,
-            "risk_reward": result.risk_reward,
+            "stop_loss": result.stop_loss if action != "HOLD" else None,
+            "take_profit1": result.take_profit1 if action != "HOLD" else None,
+            "take_profit2": result.take_profit2 if action != "HOLD" else None,
+            "take_profit3": result.take_profit3 if action != "HOLD" else None,
+            "risk_reward": result.risk_reward if action != "HOLD" else 0.0,
+            "risk_reward_tp1": result.risk_reward_tp1 if action != "HOLD" else 0.0,
+            "risk_reward_tp2": result.risk_reward_tp2 if action != "HOLD" else 0.0,
         },
     }

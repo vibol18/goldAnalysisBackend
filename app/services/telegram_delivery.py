@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app import config
-from app.services import data, db
+from app.services import data, db, price_service
 from app.services import telegram_bot as bot
 from app.services import telegram_client as tg
 from app.services import telegram_text as txt
@@ -52,8 +52,9 @@ def _in_quiet_hours(user: dict[str, Any]) -> bool:
 def _eligible(user: dict[str, Any], signal: dict[str, Any]) -> bool:
     if not user.get("is_active"):
         return False
-    if GRADE_RANK.get(str(signal.get("grade") or "C"), 0) < GRADE_RANK.get(
-        str(user.get("min_grade") or "A"), 2,
+    signal_grade = str(signal.get("grade") or "").strip()
+    if signal_grade and GRADE_RANK.get(signal_grade, 0) < GRADE_RANK.get(
+        str(user.get("min_grade") or "C"), 0,
     ):
         return False
     timeframes = {value for value in str(user.get("timeframes") or "").split(",") if value}
@@ -152,7 +153,7 @@ def dispatch_catchup() -> int:
     if not config.TELEGRAM_CATCHUP_ENABLED or not tg.client.configured:
         return 0
     try:
-        entry = data.get_ohlcv(config.GOLD_TICKER, "1h")
+        entry = price_service.get_series("1h")
         price = float(entry.df.iloc[-1]["close"])
     except Exception:  # noqa: BLE001
         return 0
@@ -239,6 +240,15 @@ def _record_error(message: str) -> None:
 
 def recent_errors() -> list[str]:
     return list(_last_errors)
+
+
+def notify_admin(message: str) -> int:
+    """Send an operational alert to configured admin chats (no-op if unset)."""
+    sent = 0
+    for chat_id in config.ADMIN_CHAT_IDS:
+        if bot.send(int(chat_id), message[:900]):
+            sent += 1
+    return sent
 
 
 async def stop() -> None:

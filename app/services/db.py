@@ -215,7 +215,7 @@ telegram_users = Table(
     Column("first_name", String(128)),
     Column("language", String(8), nullable=False, default="en"),
     Column("is_active", Integer, nullable=False, default=1),
-    Column("min_grade", String(8), nullable=False, default="A"),
+    Column("min_grade", String(8), nullable=False, default="C"),
     Column("timeframes", String(120), nullable=False, default="15m,1h,4h"),
     Column("symbols", String(200), nullable=False, default="XAU/USD"),
     Column("quiet_start", String(8)),
@@ -244,6 +244,57 @@ telegram_link_codes = Table(
     Column("expires_at", String(40), nullable=False),
     Column("used", Integer, nullable=False, default=0),
     Column("created_at", String(40), nullable=False),
+)
+
+
+bridge_candles = Table(
+    "bridge_candles", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("symbol", String(32), nullable=False),
+    Column("timeframe", String(8), nullable=False),
+    Column("broker_time", Integer, nullable=False),
+    Column("time", Integer, nullable=False),
+    Column("open", Float, nullable=False),
+    Column("high", Float, nullable=False),
+    Column("low", Float, nullable=False),
+    Column("close", Float, nullable=False),
+    Column("volume", Float, nullable=False, default=0.0),
+    Column("spread", Float, nullable=False, default=0.0),
+    Column("real_volume", Float),
+    Column("received_at", String(40), nullable=False),
+    UniqueConstraint("symbol", "timeframe", "broker_time", name="uq_bridge_candle"),
+)
+
+bridge_ticks = Table(
+    "bridge_ticks", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("symbol", String(32), nullable=False),
+    Column("broker_time", Integer, nullable=False),
+    Column("time", Integer, nullable=False),
+    Column("bid", Float, nullable=False),
+    Column("ask", Float, nullable=False),
+    Column("spread", Float, nullable=False),
+    Column("digits", Integer),
+    Column("point", Float),
+    Column("contract_size", Float),
+    Column("broker", String(64)),
+    Column("server", String(64)),
+    Column("received_at", String(40), nullable=False),
+)
+
+bridge_meta = Table(
+    "bridge_meta", metadata,
+    Column("symbol", String(32), primary_key=True),
+    Column("broker", String(64), nullable=False, default=""),
+    Column("server", String(64), nullable=False, default=""),
+    Column("digits", Integer, nullable=False, default=2),
+    Column("point", Float, nullable=False, default=0.01),
+    Column("contract_size", Float, nullable=False, default=100.0),
+    Column("timezone_offset_seconds", Integer, nullable=False, default=0),
+    Column("currency", String(16), nullable=False, default="USD"),
+    Column("last_candle_at", String(40)),
+    Column("last_tick_at", String(40)),
+    Column("updated_at", String(40), nullable=False),
 )
 
 
@@ -513,17 +564,28 @@ def clear_chat(user_id: int | None = None) -> None:
 def signal_stats() -> dict[str, Any]:
     with _lock:
         conn = get_conn()
-        total = conn.execute("SELECT COUNT(*) c FROM signals").fetchone()["c"]
-        closed = conn.execute(
-            "SELECT COUNT(*) c FROM signals WHERE status='closed'",
+        total = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE COALESCE(source,'live')!='legacy_data'",
         ).fetchone()["c"]
-        tp = conn.execute("SELECT COUNT(*) c FROM signals WHERE hit='TP'").fetchone()["c"]
-        sl = conn.execute("SELECT COUNT(*) c FROM signals WHERE hit='SL'").fetchone()["c"]
+        closed = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE status='closed' "
+            "AND COALESCE(source,'live')!='legacy_data'",
+        ).fetchone()["c"]
+        tp = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE hit='TP' "
+            "AND COALESCE(source,'live')!='legacy_data'",
+        ).fetchone()["c"]
+        sl = conn.execute(
+            "SELECT COUNT(*) c FROM signals WHERE hit='SL' "
+            "AND COALESCE(source,'live')!='legacy_data'",
+        ).fetchone()["c"]
         open_count = conn.execute(
-            "SELECT COUNT(*) c FROM signals WHERE status='open'",
+            "SELECT COUNT(*) c FROM signals WHERE status='open' "
+            "AND COALESCE(source,'live')!='legacy_data'",
         ).fetchone()["c"]
         average = conn.execute(
-            "SELECT AVG(result_pct) a FROM signals WHERE result_pct IS NOT NULL",
+            "SELECT AVG(result_pct) a FROM signals WHERE result_pct IS NOT NULL "
+            "AND COALESCE(source,'live')!='legacy_data'",
         ).fetchone()["a"]
     return {
         "total": total,
@@ -654,7 +716,7 @@ def tg_upsert_user(chat_id: int, username: str | None, first_name: str | None) -
             """INSERT INTO telegram_users
                (chat_id, username, first_name, language, is_active, min_grade,
                 timeframes, symbols, daily_cap, created_at)
-               VALUES (?,?,?,'en',1,'A','15m,1h,4h','XAU/USD',?,?)
+               VALUES (?,?,?,'en',1,'C','15m,1h,4h','XAU/USD',?,?)
                ON CONFLICT(chat_id) DO UPDATE SET
                  username=excluded.username, first_name=excluded.first_name,
                  is_active=1""",
@@ -822,3 +884,131 @@ def tg_last_delivery_at() -> str | None:
             "SELECT MAX(created_at) value FROM telegram_deliveries",
         ).fetchone()
     return row["value"] if row else None
+
+
+# --- MT5 bridge storage ------------------------------------------------------
+def bridge_insert_candles(symbol: str, timeframe: str, rows: list[dict[str, Any]]) -> int:
+    """Idempotently store bridge candles. Returns the number of new rows."""
+    if not rows:
+        return 0
+    inserted = 0
+    with _lock:
+        conn = get_conn()
+        for row in rows:
+            result = conn.execute(
+                """INSERT INTO bridge_candles
+                   (symbol, timeframe, broker_time, time, open, high, low, close,
+                    volume, spread, real_volume, received_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(symbol, timeframe, broker_time) DO NOTHING""",
+                (
+                    symbol, timeframe, int(row["broker_time"]), int(row["time"]),
+                    float(row["open"]), float(row["high"]), float(row["low"]),
+                    float(row["close"]), float(row.get("volume") or 0.0),
+                    float(row.get("spread") or 0.0), row.get("real_volume"), _now(),
+                ),
+            )
+            inserted += max(0, int(result.rowcount or 0))
+        conn.commit()
+    return inserted
+
+
+def bridge_insert_tick(symbol: str, tick: dict[str, Any]) -> None:
+    with _lock:
+        conn = get_conn()
+        conn.execute(
+            """INSERT INTO bridge_ticks
+               (symbol, broker_time, time, bid, ask, spread, digits, point,
+                contract_size, broker, server, received_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                symbol, int(tick["broker_time"]), int(tick["time"]),
+                float(tick["bid"]), float(tick["ask"]), float(tick["spread"]),
+                tick.get("digits"), tick.get("point"), tick.get("contract_size"),
+                tick.get("broker"), tick.get("server"), _now(),
+            ),
+        )
+        conn.commit()
+
+
+def bridge_update_meta(symbol: str, meta: dict[str, Any]) -> None:
+    with _lock:
+        conn = get_conn()
+        conn.execute(
+            """INSERT INTO bridge_meta
+               (symbol, broker, server, digits, point, contract_size,
+                timezone_offset_seconds, currency, last_candle_at, last_tick_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(symbol) DO UPDATE SET
+                 broker=excluded.broker, server=excluded.server, digits=excluded.digits,
+                 point=excluded.point, contract_size=excluded.contract_size,
+                 timezone_offset_seconds=excluded.timezone_offset_seconds,
+                 currency=excluded.currency,
+                 last_candle_at=COALESCE(excluded.last_candle_at, bridge_meta.last_candle_at),
+                 last_tick_at=COALESCE(excluded.last_tick_at, bridge_meta.last_tick_at),
+                 updated_at=excluded.updated_at""",
+            (
+                symbol, meta.get("broker") or "", meta.get("server") or "",
+                int(meta.get("digits") or 2), float(meta.get("point") or 0.01),
+                float(meta.get("contract_size") or 100.0),
+                int(meta.get("timezone_offset_seconds") or 0),
+                meta.get("currency") or "USD", meta.get("last_candle_at"),
+                meta.get("last_tick_at"), _now(),
+            ),
+        )
+        conn.commit()
+
+
+def bridge_get_meta(symbol: str | None = None) -> dict[str, Any] | None:
+    with _lock:
+        if symbol:
+            row = get_conn().execute(
+                "SELECT * FROM bridge_meta WHERE symbol=?", (symbol,),
+            ).fetchone()
+        else:
+            row = get_conn().execute(
+                "SELECT * FROM bridge_meta ORDER BY updated_at DESC LIMIT 1",
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def bridge_get_candles(
+    symbol: str, timeframe: str, limit: int = 1500,
+) -> list[dict[str, Any]]:
+    with _lock:
+        rows = get_conn().execute(
+            """SELECT broker_time, time, open, high, low, close, volume, spread, real_volume
+               FROM bridge_candles WHERE symbol=? AND timeframe=?
+               ORDER BY broker_time DESC LIMIT ?""",
+            (symbol, timeframe, max(1, min(int(limit), 10000))),
+        ).fetchall()
+    return [dict(row) for row in reversed(rows)]
+
+
+def bridge_get_latest_tick(symbol: str | None = None) -> dict[str, Any] | None:
+    with _lock:
+        if symbol:
+            row = get_conn().execute(
+                """SELECT * FROM bridge_ticks WHERE symbol=?
+                   ORDER BY broker_time DESC, id DESC LIMIT 1""", (symbol,),
+            ).fetchone()
+        else:
+            row = get_conn().execute(
+                "SELECT * FROM bridge_ticks ORDER BY broker_time DESC, id DESC LIMIT 1",
+            ).fetchone()
+    return dict(row) if row else None
+
+
+def bridge_latest_candle_age(symbol: str, timeframe: str) -> float | None:
+    meta = bridge_get_meta(symbol)
+    stamp = (meta or {}).get("last_candle_at")
+    if not stamp:
+        return None
+    try:
+        from datetime import datetime, timezone
+        when = datetime.fromisoformat(str(stamp))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - when).total_seconds()
+    except (ValueError, TypeError):
+        return None

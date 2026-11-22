@@ -156,6 +156,29 @@ def get_ohlcv(ticker: str, timeframe: str, force: bool = False) -> CacheEntry:
     """
     if timeframe not in TIMEFRAMES:
         timeframe = "1h"
+    logger.info(
+        "candle-series request ticker=%s timeframe=%s storage_timezone=UTC "
+        "higher_timeframe_build=provider/calendar-resample",
+        ticker,
+        timeframe,
+    )
+
+    # Priority 1: the trader's own MT5 candles. Never cached alongside fallback
+    # data, so a chart always comes from exactly one source.
+    priority = tuple(name for name in config.DATA_SOURCE_PRIORITY if name)
+    if "mt5" in priority and config.BRIDGE_API_KEY and ticker in (
+        config.GOLD_TICKER, config.GOLD_FALLBACK_TICKER, "XAUUSD", "XAU/USD",
+    ):
+        from app.services import bridge
+        try:
+            st = bridge.status()
+            if st["online"]:
+                entry = bridge.load_frame(timeframe)
+                if entry is not None:
+                    return entry
+        except Exception as exc:  # noqa: BLE001 - bridge must never break the app
+            logger.debug("bridge data unavailable: %s", exc)
+
     key = _key(ticker, timeframe)
     ttl = TIMEFRAMES[timeframe][2]
     with _cache_lock:
@@ -172,6 +195,8 @@ def get_ohlcv(ticker: str, timeframe: str, force: bool = False) -> CacheEntry:
         errors: list[str] = []
         fetched: CacheEntry | None = None
         for provider in PROVIDERS:
+            if provider.name not in priority:
+                continue
             if not provider.supports(ticker):
                 continue
             cooldown_key = (provider.name, ticker)
@@ -185,8 +210,20 @@ def get_ohlcv(ticker: str, timeframe: str, force: bool = False) -> CacheEntry:
                     PROVIDER_TIMEOUTS.get(provider.name, 12.0),
                 )
                 _provider_cooldown.pop(cooldown_key, None)
-                fetched = CacheEntry(df=df, fetched_at=time.time(),
-                                     source=provider.name)
+                fetched = CacheEntry(
+                    df=df, fetched_at=time.time(), source=provider.name,
+                    meta={
+                        "source_kind": "fallback",
+                        "approximate": provider.name in {"yfinance", "yahoo-chart"},
+                        "symbol_label": "XAU/USD",
+                        "price_side": config.CANDLE_PRICE_SIDE,
+                        "higher_timeframe_build": (
+                            "provider native candles"
+                            if provider.name in {"twelvedata", "oanda"}
+                            else "provider native/resampled"
+                        ),
+                    },
+                )
                 break
             except Exception as exc:  # noqa: BLE001 - providers may raise anything
                 message = f"{provider.name}: {exc}"
@@ -243,6 +280,16 @@ def get_market_overview() -> dict[str, Any]:
             logger.warning("live gold quote failed: %s", exc)
 
     price = candle_price if candle_price is not None else quote_price
+    live: dict[str, Any] | None = None
+    try:
+        from app.services import prices
+        live = prices.FEED.snapshot()
+        if live.get("state") in (prices.LIVE, prices.DELAYED) and live.get("price") is not None:
+            price = float(live["price"])
+            quote_price = float(live["price"])
+            quote_updated = live.get("time")
+    except Exception:  # noqa: BLE001
+        pass
     prev_close = _last_close(daily)
     if len(daily.df) > 1:
         try:
@@ -262,6 +309,15 @@ def get_market_overview() -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             hi = lo = None
 
+    live_source = None
+    if live is not None:
+        try:
+            from app.services import prices
+            if live.get("state") in (prices.LIVE, prices.DELAYED):
+                live_source = live.get("source")
+        except Exception:  # noqa: BLE001
+            pass
+
     out["gold"] = {
         "ticker": config.GOLD_TICKER,
         "symbol": "XAU/USD (Gold)",
@@ -275,9 +331,13 @@ def get_market_overview() -> dict[str, Any]:
         "as_of": quote_updated or (
             str(intraday.df.index[-1]) if not intraday.df.empty else None
         ),
-        "stale": candle_price is None and intraday.stale,
-        "source": (intraday.source if candle_price is not None
-                   else ("gold-api" if quote_price is not None else None)),
+        "stale": live_source is None and candle_price is None and intraday.stale,
+        "source": (
+            live_source
+            if live_source is not None
+            else (intraday.source if candle_price is not None
+                  else ("gold-api" if quote_price is not None else None))
+        ),
         "error": intraday.error if price is None else None,
     }
 
@@ -309,10 +369,14 @@ def get_market_overview() -> dict[str, Any]:
 
     fresh_entries = [e for e in (intraday, daily) if not e.stale and not e.df.empty]
     out["meta"] = {
-        "stale": candle_price is None and (intraday.stale or daily.stale),
+        "stale": live_source is None and candle_price is None and (intraday.stale or daily.stale),
         "synthetic": False,
-        "source": (intraday.source if candle_price is not None
-                   else ("gold-api" if quote_price is not None else None)),
+        "source": (
+            live_source
+            if live_source is not None
+            else (intraday.source if candle_price is not None
+                  else ("gold-api" if quote_price is not None else None))
+        ),
         "last_updated": (quote_updated if quote_price is not None else
                          max((e.last_updated for e in fresh_entries), default=None)),
         "error": intraday.error if price is None else None,

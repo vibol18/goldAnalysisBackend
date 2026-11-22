@@ -11,6 +11,7 @@ import pandas as pd
 from app import config
 from app.intelligence import data_sources as ds
 from app.services import data as market_data
+from app.services import price_service
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ def volatility(timeframe: str = "1D") -> dict[str, Any]:
     """ATR percentile, realized/GARCH vol, regime and Hurst (causal)."""
     from app.intelligence import volatility as vol
     try:
-        frame = market_data.get_ohlcv(config.GOLD_TICKER, timeframe).df
+        frame = price_service.get_series(timeframe).df
         if frame is None or frame.empty:
             return {"available": False, "reason": "gold data unavailable", "disclaimer": DISCLAIMER}
         features = vol.volatility_features(frame)
@@ -68,8 +69,8 @@ def volatility(timeframe: str = "1D") -> dict[str, Any]:
         return {
             "available": True,
             "timeframe": timeframe,
-            "source": market_data.get_ohlcv(config.GOLD_TICKER, timeframe).source,
-            "updated_at": market_data.get_ohlcv(config.GOLD_TICKER, timeframe).last_updated,
+            "source": price_service.get_series(timeframe).source,
+            "updated_at": price_service.get_series(timeframe).last_updated,
             "current": {**numeric,
                         "vol_regime": {0: "low", 1: "normal", 2: "high"}.get(
                             int(last.get("vol_regime_code", 1)), "normal"),
@@ -87,7 +88,7 @@ def regime(timeframe: str = "1D") -> dict[str, Any]:
     """Causal forward-filtered regime with expectancy and trade weights."""
     from app.intelligence import regime as rg
     try:
-        frame = market_data.get_ohlcv(config.GOLD_TICKER, timeframe).df
+        frame = price_service.get_series(timeframe).df
         if frame is None or frame.empty:
             return {"available": False, "reason": "gold data unavailable", "disclaimer": DISCLAIMER}
         labels = rg.detect_regime(frame)
@@ -126,7 +127,7 @@ def model_report(timeframe: str = "1D", refresh: bool = False) -> dict[str, Any]
         cached = _MODEL_CACHE.get(timeframe)
         if cached and not refresh and now - cached[0] < 3600:
             return cached[1]
-        frame = market_data.get_ohlcv(config.GOLD_TICKER, timeframe).df
+        frame = price_service.get_series(timeframe).df
         if frame is None or len(frame) < 300:
             return {"available": False, "reason": "insufficient real history", "disclaimer": DISCLAIMER}
         X, y = fe.make_extended_supervised(frame, include_network=True)
@@ -158,8 +159,8 @@ def model_report(timeframe: str = "1D", refresh: bool = False) -> dict[str, Any]
             "feature_importance": bundle.importance[:20],
             "current_regime": regime_name,
             "regime_weight": weights.get(regime_name, 0.0),
-            "source": market_data.get_ohlcv(config.GOLD_TICKER, timeframe).source,
-            "updated_at": market_data.get_ohlcv(config.GOLD_TICKER, timeframe).last_updated,
+            "source": price_service.get_series(timeframe).source,
+            "updated_at": price_service.get_series(timeframe).last_updated,
             "disclaimer": DISCLAIMER,
         }
         _MODEL_CACHE[timeframe] = (now, payload)
@@ -173,7 +174,7 @@ def model_report(timeframe: str = "1D", refresh: bool = False) -> dict[str, Any]
 def data_health() -> dict[str, Any]:
     """Provenance and freshness of every macro input (N/A when missing)."""
     snapshot = ds.macro_snapshot()
-    gold = market_data.get_ohlcv(config.GOLD_TICKER, "1D")
+    gold = price_service.get_series("1D")
     rows = []
     for key in ("real_yield", "breakeven_inflation", "intermarket", "cot", "calendar", "news"):
         item = snapshot.get(key, {})

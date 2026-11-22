@@ -13,7 +13,7 @@ import httpx
 import pandas as pd
 
 from app import config
-from app.services import concept_context, data, db, telegram_delivery
+from app.services import concept_context, data, db, price_service, prices, telegram_delivery
 from app.services.signal_engine import generate_signal
 
 logger = logging.getLogger(__name__)
@@ -250,7 +250,7 @@ def send_email(text: str) -> str:
     port = config.SMTP_PORT
     sender = config.SMTP_FROM or user
     message = EmailMessage()
-    message["Subject"] = "GoldSight alert"
+    message["Subject"] = "Meas Pro alert"
     message["From"] = sender
     message["To"] = recipient
     message.set_content(text)
@@ -266,7 +266,7 @@ def send_email(text: str) -> str:
 
 def _notification_text(alert: dict[str, Any]) -> str:
     return (
-        f"GoldSight {alert.get('type', 'alert')} alert - "
+        f"Meas Pro {alert.get('type', 'alert')} alert - "
         f"{alert.get('timeframe', '')} | grade {alert.get('grade', '')}\n"
         f"{alert.get('message', '')}\n\n{DISCLAIMER}"
     )
@@ -408,6 +408,12 @@ def _event_message(kind: str, signal: dict[str, Any], level: float | None,
 
 
 async def scan_once() -> list[dict[str, Any]]:
+    if config.REQUIRE_BRIDGE_FOR_SIGNALS and prices.FEED.snapshot()["source"] != "mt5":
+        logger.info("alert scan skipped: MT5 bridge offline")
+        return []
+    if prices.FEED.is_stale():
+        logger.info("alert scan skipped: price feed is not live")
+        return []
     settings = get_settings()
     enabled_channels = [
         name for name in CHANNEL_NAMES if settings["channels"][name]
@@ -424,7 +430,7 @@ async def scan_once() -> list[dict[str, Any]]:
             continue
         try:
             entry = await asyncio.to_thread(
-                data.get_ohlcv, config.GOLD_TICKER, timeframe)
+                price_service.get_series, timeframe)
         except Exception as exc:  # noqa: BLE001
             logger.warning("alert scan: %s data fetch failed: %s", timeframe, exc)
             continue

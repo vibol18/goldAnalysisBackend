@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 _CACHE: dict[str, tuple[float, "SeriesResult"]] = {}
 _LOCK = threading.RLock()
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; GoldSight/1.0)"}
+_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; Meas-Pro/1.0)"}
 
 
 @dataclass

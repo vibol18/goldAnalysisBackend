@@ -1,4 +1,4 @@
-"""Telegram command/callback handlers built on the existing GoldSight services."""
+"""Telegram command/callback handlers built on the existing Meas Pro services."""
 from __future__ import annotations
 
 import logging
@@ -7,7 +7,7 @@ from collections import defaultdict, deque
 from typing import Any
 
 from app import config
-from app.services import chart_annotations, data, db, signal_engine
+from app.services import chart_annotations, data, db, price_service, signal_engine
 from app.services import telegram_client as tg
 from app.services import telegram_text as txt
 
@@ -79,7 +79,7 @@ def _latest_signal() -> dict[str, Any] | None:
 
 def _live_signal() -> dict[str, Any] | None:
     try:
-        entry = data.get_ohlcv(config.GOLD_TICKER, "1h")
+        entry = price_service.get_series("1h")
         frame = entry.df.iloc[:-1] if len(entry.df) > 2 else entry.df
         signal = signal_engine.generate_signal(
             frame, "1h", train_model=False, use_concepts=False,
@@ -93,7 +93,7 @@ def _live_signal() -> dict[str, Any] | None:
 def _price_text(chat_id: int) -> str:
     language = _language(chat_id)
     try:
-        entry = data.get_ohlcv(config.GOLD_TICKER, "1h")
+        entry = price_service.get_series("1h")
         price = float(entry.df.iloc[-1]["close"])
         return txt.with_disclaimer(
             txt.tr(language, "price", price=txt.money(price)), language,
@@ -164,7 +164,7 @@ def _levels(chat_id: int) -> None:
     language = _language(chat_id)
     timeframe = str((_user(chat_id) or {}).get("timeframes") or "15m,1h,4h").split(",")[0]
     try:
-        entry = data.get_ohlcv(config.GOLD_TICKER, timeframe)
+        entry = price_service.get_series(timeframe)
         payload = chart_annotations.build_payload(entry, timeframe)
         annotations = payload.get("annotations") or []
         lines = []

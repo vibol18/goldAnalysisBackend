@@ -16,7 +16,7 @@ from app import config
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are GoldSight Assistant, an educational gold-market analyst. "
+    "You are Meas Pro Assistant, an educational gold-market analyst. "
     "You discuss XAU/USD (gold) analysis: technical indicators, macro drivers "
     "(DXY, US Treasury yields, equities), the app's current signal, and its "
     "detected trading concepts (FVG, order block, BOS, CHoCH, liquidity sweeps, "

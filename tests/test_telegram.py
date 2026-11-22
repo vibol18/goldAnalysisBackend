@@ -81,6 +81,20 @@ def test_dispatch_signal_filters_and_is_idempotent(
     assert "Open chart" in jobs[0].params["reply_markup"]["inline_keyboard"][0][0]["text"]
 
 
+def test_default_subscriber_gets_every_signal_grade(
+    isolated: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs: list[tg.DeliveryJob] = []
+    monkeypatch.setattr(tg.queue, "submit", lambda job: jobs.append(job) or True)
+    db.tg_upsert_user(21, "carol", "Carol")
+    assert db.tg_get_user(21)["min_grade"] == "C"
+
+    for index, grade in enumerate([None, "C", "B", "A", "A+"]):
+        assert delivery.dispatch_signal(dict(SIGNAL, id=200 + index, grade=grade)) == 1
+
+    assert len(jobs) == 5
+
+
 def test_dispatch_signal_honours_timeframe_and_pause(
     isolated: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

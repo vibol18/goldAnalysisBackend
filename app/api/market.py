@@ -3,17 +3,21 @@ from __future__ import annotations
 
 import bisect
 import math
+import logging
 from datetime import datetime, timezone
 from typing import Any
+import pandas as pd
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 
 from app import config
 from app.services import auth
-from app.services import data, db
+from app.services import data, db, price_service
 from app.services.indicators import add_all
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+logger = logging.getLogger(__name__)
 
 
 def _signal_markers(candle_times: list[int], timeframe: str) -> list[dict[str, Any]]:
@@ -57,6 +61,135 @@ def overview() -> dict[str, Any]:
     return data.get_market_overview()
 
 
+@router.get("/live")
+def live() -> dict[str, Any]:
+    """Current canonical XAU/USD tick snapshot for reconnect/resync fallback."""
+    payload = price_service.status()
+    payload["verification"] = price_service.verification()
+    return payload
+
+
+@router.get("/candle-check")
+def candle_check(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$")) -> dict[str, Any]:
+    """Diagnostic view of the exact series used for one chart timeframe."""
+    entry = price_service.get_series(timeframe)
+    frame = entry.df.tail(50).copy()
+    meta = entry.meta or {}
+    source = entry.source or "none"
+    side = "bid" if source == "mt5" else str(meta.get("price_side") or "mid")
+    approximate = bool(meta.get("approximate", source not in {"mt5"}))
+    status = "STALE" if entry.stale else ("APPROXIMATE" if approximate else "LIVE")
+
+    try:
+        local_zone = ZoneInfo(config.CANDLE_DISPLAY_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        local_zone = ZoneInfo("UTC")
+        local_name = "UTC"
+    else:
+        local_name = config.CANDLE_DISPLAY_TIMEZONE
+
+    rows: list[dict[str, Any]] = []
+    missing: list[str] = []
+    import pandas as pd
+    if not frame.empty:
+        index = pd.DatetimeIndex(frame.index)
+        if index.tz is None:
+            index = index.tz_localize("UTC")
+        else:
+            index = index.tz_convert("UTC")
+        local_index = index.tz_convert(local_zone)
+        previous = None
+        seconds = {"15m": 900, "1h": 3600, "4h": 14400, "1D": 86400}[timeframe]
+        for position, (utc_ts, local_ts) in enumerate(zip(index, local_index)):
+            row = frame.iloc[position]
+            epoch = int(utc_ts.timestamp())
+            if previous is not None:
+                gap = epoch - previous
+                previous_dt = datetime.fromtimestamp(previous, timezone.utc)
+                saturday_closed = previous_dt.weekday() == 4 and gap > seconds * 48
+                sunday_closed = previous_dt.weekday() == 5
+                if gap > seconds * 1.5 and not saturday_closed and not sunday_closed:
+                    missing.append(datetime.fromtimestamp(previous, timezone.utc).isoformat())
+            previous = epoch
+            rows.append({
+                "utc": utc_ts.isoformat(),
+                "local": local_ts.isoformat(),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": float(row.get("Volume", 0) or 0),
+            })
+
+    meta_payload = {
+        "source": source,
+        "broker": meta.get("broker"),
+        "server": meta.get("server"),
+        "symbol": meta.get("symbol") or meta.get("symbol_label") or "XAU/USD",
+        "digits": meta.get("digits"),
+        "timezone_offset_seconds": meta.get("timezone_offset_seconds"),
+        "storage_timezone": "UTC",
+        "display_timezone": local_name,
+        "higher_timeframe_build": meta.get("higher_timeframe_build")
+        or ("broker-provided; no local aggregation" if source == "mt5" else "provider-provided/resampled"),
+        "price_side": side,
+        "status": status,
+    }
+    logger.info(
+        "candle-check source=%s timeframe=%s storage_timezone=UTC display_timezone=%s "
+        "price_side=%s higher_timeframe_build=%s missing_gap_reports=%d",
+        source, timeframe, local_name, side,
+        meta_payload["higher_timeframe_build"], len(missing),
+    )
+    return {
+        "timeframe": timeframe,
+        "meta": meta_payload,
+        "missing_bars": missing[:20],
+        "candles": rows,
+        "disclaimer": "Educational analysis only. Not financial advice.",
+    }
+
+
+@router.post("/compare-tradingview")
+async def compare_tradingview(
+    file: UploadFile = File(...),
+    timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
+) -> dict[str, Any]:
+    """Compare a user-exported TradingView CSV against Meas Pro's active series."""
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(413, "CSV is too large")
+    try:
+        from app.services.tradingview_compare import (
+            align_and_compare,
+            detect_timeframe,
+            parse_tradingview_csv,
+        )
+        reference = parse_tradingview_csv(content)
+    except Exception as exc:  # noqa: BLE001 - CSV parse errors are user errors
+        raise HTTPException(422, f"Could not parse TradingView CSV: {exc}") from exc
+
+    entry = price_service.get_series(timeframe)
+    if entry.df is None or entry.df.empty:
+        raise HTTPException(503, entry.error or "No app candles available")
+    app_frame = entry.df.rename(columns={
+        "Open": "open", "High": "high", "Low": "low", "Close": "close"
+    })
+    result = align_and_compare(reference, app_frame)
+    return {
+        "timeframe": timeframe,
+        "detected_reference_timeframe": detect_timeframe(
+            pd.DatetimeIndex(reference.index)
+        ),
+        "source": entry.source,
+        "source_status": "STALE" if entry.stale else (
+            "APPROXIMATE" if bool((entry.meta or {}).get("approximate", False)) else "LIVE"
+        ),
+        "price_side": (entry.meta or {}).get("price_side", "bid"),
+        **result,
+    }
+
+
 @router.get("/candles")
 def candles(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
             ticker: str | None = None,
@@ -65,7 +198,7 @@ def candles(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
     # XAU/USD is the only user-selectable market; the futures symbol is only
     # used internally as a data-source fallback.
     tk = config.GOLD_TICKER
-    entry = data.get_ohlcv(tk, timeframe, force=force)
+    entry = price_service.get_series(timeframe, force=force)
     if entry.df.empty:
         empty = {"time": [], "open": [], "high": [], "low": [], "close": [], "volume": []}
         return {
@@ -74,6 +207,9 @@ def candles(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
             "timeframe": timeframe,
             "stale": True,
             "synthetic": False,
+            "source": entry.source,
+            "source_status": "STALE",
+            "price_side": "bid",
             "error": entry.error or "no live XAU/USD data available",
             "candles": empty,
             "overlays": {},
@@ -133,6 +269,17 @@ def candles(timeframe: str = Query("1h", pattern="^(15m|1h|4h|1D)$"),
         "timeframe": timeframe,
         "stale": entry.stale,
         "synthetic": entry.synthetic,
+        "source": entry.source,
+        "source_status": (
+            "STALE" if entry.stale
+            else ("APPROXIMATE" if bool((entry.meta or {}).get("approximate", False))
+                  else "LIVE")
+        ),
+        "price_side": (entry.meta or {}).get("price_side", "bid"),
+        "broker": (entry.meta or {}).get("series_broker"),
+        "dataset_hash": (entry.meta or {}).get("dataset_hash"),
+        "canonical": (entry.meta or {}).get("canonical", False),
+        "source_boundaries": price_service.series_meta(timeframe)["boundaries"],
         "error": entry.error,
         "candles": candles_out,
         "overlays": overlays,

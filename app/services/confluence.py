@@ -121,6 +121,8 @@ class ConfluenceResult:
     risk_reward: float
     invalidation: str
     regime: str
+    risk_reward_tp1: float = 0.0
+    risk_reward_tp2: float = 0.0
     ml_probability: float | None = None
     killzone_active: bool = False
     notes: list[str] = field(default_factory=list)
@@ -137,6 +139,8 @@ class ConfluenceResult:
             "stop_loss": self.stop_loss, "take_profit1": self.take_profit1,
             "take_profit2": self.take_profit2, "take_profit3": self.take_profit3,
             "risk_reward": round(self.risk_reward, 2),
+            "risk_reward_tp1": round(self.risk_reward_tp1, 2),
+            "risk_reward_tp2": round(self.risk_reward_tp2, 2),
             "invalidation": self.invalidation, "regime": self.regime,
             "ml_probability": self.ml_probability,
             "killzone_active": self.killzone_active, "notes": self.notes,
@@ -265,6 +269,19 @@ def confluence(concepts: list[Any], df: pd.DataFrame,
         blend = float(settings["ml_blend"])
         score = float(np.clip((1.0 - blend) * score + blend * ml_score, -1.0, 1.0))
 
+    location_penalties: list[str] = []
+    location_concepts = by_type.get("premium_discount") or []
+    if location_concepts:
+        location = location_concepts[-1]
+        at_premium = location.direction == "bearish"
+        at_discount = location.direction == "bullish"
+        if score > 0 and at_premium:
+            score = float(np.clip(score - 0.15, -1.0, 1.0))
+            location_penalties.append("BUY at premium penalised: wait for discount")
+        elif score < 0 and at_discount:
+            score = float(np.clip(score + 0.15, -1.0, 1.0))
+            location_penalties.append("SELL at discount penalised: wait for premium")
+
     action = ("BUY" if score >= float(settings["score_buy_threshold"]) else
               "SELL" if score <= float(settings["score_sell_threshold"]) else "HOLD")
 
@@ -288,6 +305,19 @@ def confluence(concepts: list[Any], df: pd.DataFrame,
     elif abs(score) >= 0.30 and agreed_categories >= 2:
         grade = "B"
 
+    expected_direction = "bullish" if action == "BUY" else "bearish" if action == "SELL" else None
+    if expected_direction:
+        conflicts = [
+            f for f in factors
+            if f.get("direction") not in (None, "neutral", expected_direction)
+            and abs(float(f.get("contribution", 0))) > 0.05
+        ]
+        if conflicts:
+            grade = {"A+": "A", "A": "B", "B": "C"}.get(grade, grade)
+            location_penalties.append(
+                "direction conflict: " + ", ".join(str(f.get("type")) for f in conflicts[:4])
+            )
+
     zone = _zone_for(concepts, "bullish" if action == "BUY" else "bearish",
                      price, atr_value) if action != "HOLD" else None
     if zone:
@@ -300,6 +330,8 @@ def confluence(concepts: list[Any], df: pd.DataFrame,
     sl = tp1 = tp2 = tp3 = None
     risk = 0.0
     rr = 0.0
+    rr1 = 0.0
+    rr2 = 0.0
     if action != "HOLD":
         buffer = 0.5 * atr_value
         recent_swings = _latest(concepts, SWING_TYPES, limit=8)
@@ -329,8 +361,10 @@ def confluence(concepts: list[Any], df: pd.DataFrame,
             tp2 = targets[1]
         if len(targets) >= 3:
             tp3 = targets[2]
-        if tp2 is not None:
-            rr = abs(tp2 - entry) / risk
+        from app.services.risk_reward import risk_reward_ratios
+        ratios = risk_reward_ratios(entry, sl, tp1, tp2)
+        rr1, rr2 = ratios["risk_reward_tp1"], ratios["risk_reward_tp2"]
+        rr = rr2 if rr2 > 0 else rr1
 
     veto: list[str] = []
     if regime in set(settings["choppy_regimes"]):
@@ -397,6 +431,7 @@ def confluence(concepts: list[Any], df: pd.DataFrame,
     if ml_probability is not None:
         notes.append(f"XGBoost P(up) {ml_probability:.0%} blended at "
                      f"{float(settings['ml_blend']):.0%}.")
+    notes.extend(location_penalties)
     notes.extend(veto)
 
     return ConfluenceResult(
@@ -405,6 +440,7 @@ def confluence(concepts: list[Any], df: pd.DataFrame,
         disagreeing=disagreeing, veto_reasons=veto, entry_zone=zone,
         stop_loss=sl, take_profit1=tp1, take_profit2=tp2, take_profit3=tp3,
         risk_reward=rr, invalidation=invalidation, regime=regime,
+        risk_reward_tp1=rr1, risk_reward_tp2=rr2,
         ml_probability=ml_probability, killzone_active=killzone_active,
         notes=notes, quality_check=quality.to_dict() if quality else None,
     )

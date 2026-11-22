@@ -1,4 +1,4 @@
-"""GoldSight FastAPI application entrypoint."""
+"""Meas Pro FastAPI application entrypoint."""
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from app import config
 from app.api import alerts as alerts_api
 from app.api import auth as auth_api
+from app.api import bridge as bridge_api
 from app.api import chart, concepts, intelligence, market, misc, signals, stream, telegram
 from app.services import auth, data, db, ratelimit, streaming, telegram_client, telegram_delivery
 from app.services import alerts as alert_service
@@ -67,11 +68,12 @@ PUBLIC_PATHS = {
     "/api", "/api/health", "/api/auth/csrf", "/api/auth/signup",
     "/api/auth/login", "/api/auth/refresh", "/api/auth/forgot",
     "/api/auth/reset", "/api/auth/verify-email",
+    "/api/bridge",
 }
 CSRF_EXEMPT = {
     "/api/auth/csrf", "/api/auth/signup", "/api/auth/login",
     "/api/auth/refresh", "/api/auth/forgot", "/api/auth/reset",
-    "/api/auth/verify-email",
+    "/api/auth/verify-email", "/api/bridge",
 }
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 EXPENSIVE_PATHS = (
@@ -105,7 +107,7 @@ async def lifespan(app: FastAPI):  # noqa: ANN201
 
 
 app = FastAPI(
-    title="GoldSight API",
+    title="Meas Pro API",
     version="1.0.0",
     description=f"XAU/USD analysis, signals, backtesting and AI chat.\n\n{DISCLAIMER}",
     lifespan=lifespan,
@@ -125,7 +127,8 @@ app.add_middleware(
     allow_origins=list(config.CORS_ORIGINS),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token", "X-Requested-With"],
+    allow_headers=["Content-Type", "Authorization", "X-CSRF-Token",
+                   "X-Requested-With", "X-Bridge-Key"],
 )
 
 
@@ -134,6 +137,7 @@ async def security_middleware(request: Request, call_next):
     path = request.url.path
     method = request.method
     is_webhook = path.startswith("/api/telegram/webhook/")
+    is_bridge = path.startswith("/api/bridge")
     expensive = any(path.startswith(p) for p in EXPENSIVE_PATHS)
     ip = auth.client_ip(request)
     try:
@@ -146,14 +150,16 @@ async def security_middleware(request: Request, call_next):
                             int(config.CHAT_RATE_LIMIT_PER_MINUTE))
         elif expensive:
             ratelimit.check(ratelimit.ip_key("expensive", ip), 5)
+        elif is_bridge:
+            pass  # the bridge router applies its own key-aware rate limit
         elif path != "/api/health" and not is_webhook:
             ratelimit.check(ratelimit.ip_key("api", ip),
                             int(config.RATE_LIMIT_PER_MINUTE))
         if (method in MUTATING and path.startswith("/api")
-                and path not in CSRF_EXEMPT and not is_webhook):
+                and path not in CSRF_EXEMPT and not is_webhook and not is_bridge):
             auth.csrf_protect(request)
         if (config.PRODUCTION and path.startswith("/api")
-                and path not in PUBLIC_PATHS and not is_webhook):
+                and path not in PUBLIC_PATHS and not is_webhook and not is_bridge):
             auth.current_user(request)
     except HTTPException as exc:
         return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
@@ -184,6 +190,7 @@ async def security_middleware(request: Request, call_next):
 
 
 app.include_router(auth_api.router)
+app.include_router(bridge_api.router)
 app.include_router(market.router)
 app.include_router(signals.router)
 app.include_router(misc.router)
@@ -211,5 +218,5 @@ def health() -> dict[str, str | None]:
 
 @app.get("/api")
 def root() -> dict[str, str]:
-    return {"app": "GoldSight", "docs": "disabled" if config.PRODUCTION else "/docs",
+    return {"app": "Meas Pro", "docs": "disabled" if config.PRODUCTION else "/docs",
             "disclaimer": DISCLAIMER}

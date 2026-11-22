@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app import config
-from app.services import data
+from app.services import price_service
 from app.services.chart_annotations import build_payload
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ def chart_annotations(
 ) -> dict[str, Any]:
     """Ranked, decluttered drawings for one timeframe and chart mode."""
     try:
-        entry = data.get_ohlcv(config.GOLD_TICKER, timeframe)
+        entry = price_service.get_series(timeframe)
         if entry.df is None or entry.df.empty:
             raise HTTPException(503, entry.error or "no live XAU/USD data available")
         return build_payload(entry, timeframe, show_all=show_all,

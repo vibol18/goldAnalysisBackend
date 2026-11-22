@@ -68,7 +68,7 @@ def link_code(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, st
         raise HTTPException(503, "Telegram bot is not configured")
     code = secrets.token_urlsafe(12)
     db.tg_create_link_code(code, int(user["id"]), config.TELEGRAM_LINK_CODE_TTL_SECONDS)
-    username = tg.client.username or "GoldSightBot"
+    username = tg.client.username or "MeasProBot"
     return {
         "code": code,
         "deep_link": f"https://t.me/{username}?start={code}",
@@ -84,6 +84,10 @@ def connection(user: dict[str, Any] = Depends(auth.current_user)) -> dict[str, A
         "chat_id": linked["chat_id"] if linked else None,
         "language": (linked or {}).get("language") or "en",
         "is_active": bool((linked or {}).get("is_active")),
+        "min_grade": (linked or {}).get("min_grade") or "C",
+        "timeframes": [
+            tf for tf in str((linked or {}).get("timeframes") or "").split(",") if tf
+        ],
     }
 
 
@@ -102,7 +106,7 @@ def update_settings(
         fields["language"] = body["language"]
     if isinstance(body.get("timeframes"), list):
         valid = [tf for tf in body["timeframes"] if tf in {"15m", "1h", "4h", "1D"}]
-        fields["timeframes"] = ",".join(valid) or "15m"
+        fields["timeframes"] = ",".join(valid)
     if isinstance(body.get("is_active"), bool):
         fields["is_active"] = int(body["is_active"])
     if fields:

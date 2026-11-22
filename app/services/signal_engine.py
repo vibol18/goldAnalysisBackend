@@ -39,6 +39,8 @@ class Signal:
     atr: float
     price: float
     timeframe: str
+    risk_reward_tp1: float = 0.0
+    risk_reward_tp2: float = 0.0
     explanation: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     grade: str = "C"
@@ -61,6 +63,8 @@ class Signal:
             "take_profit1": round(self.take_profit1, 2),
             "take_profit2": round(self.take_profit2, 2),
             "risk_reward": round(self.risk_reward, 2),
+            "risk_reward_tp1": round(self.risk_reward_tp1, 2),
+            "risk_reward_tp2": round(self.risk_reward_tp2, 2),
             "atr": round(self.atr, 3),
             "price": round(self.price, 2),
             "timeframe": self.timeframe,
@@ -303,10 +307,11 @@ def generate_signal(df: pd.DataFrame, timeframe: str,
         base_conf = min(abs(final) / 0.8, 1.0)
         confidence = float(np.clip((0.7 * base_conf + 0.3 * agreement) * 100.0, 5.0, 97.0))
 
-    risk = abs(entry - sl)
-    reward = abs(tp2 - entry)
-    rr = reward / risk if risk > 0 else 0.0
-    if cf is not None:
+    from app.services.risk_reward import risk_reward_ratios
+    ratios = risk_reward_ratios(entry, sl, tp1, tp2)
+    rr1, rr2 = ratios["risk_reward_tp1"], ratios["risk_reward_tp2"]
+    rr = rr2 if rr2 > 0 else rr1
+    if cf is not None and cf.risk_reward > 0:
         rr = cf.risk_reward
 
     bullish = [c for c in comps if c["score"] > 0.1]
@@ -361,6 +366,8 @@ def generate_signal(df: pd.DataFrame, timeframe: str,
         take_profit1=tp1,
         take_profit2=tp2,
         risk_reward=rr,
+        risk_reward_tp1=rr1,
+        risk_reward_tp2=rr2,
         atr=atr,
         price=price,
         timeframe=timeframe,

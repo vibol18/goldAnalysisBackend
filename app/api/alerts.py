@@ -79,7 +79,7 @@ async def test_delivery(request: Request, user: dict | None = Depends(auth.optio
         "action": "TEST",
         "grade": "n/a",
         "price": None,
-        "message": "This is a GoldSight test alert. " + alert_service.DISCLAIMER,
+        "message": "This is a Meas Pro test alert. " + alert_service.DISCLAIMER,
         "channels": channels, "user_id": uid,
     })
     results = await alert_service.notify(alert)

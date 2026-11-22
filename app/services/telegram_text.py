@@ -13,7 +13,7 @@ TEXT: dict[str, dict[str, str]] = {
     "en": {
         "disclaimer": DISCLAIMER,
         "welcome": (
-            "Welcome to GoldSight Alerts, {name}!\n\n"
+            "Welcome to Meas Pro Alerts, {name}!\n\n"
             "You will receive every new BUY/SELL signal and its TP/SL updates "
             "automatically.\nUse /settings to choose grade, timeframes and language.\n\n"
             "Commands:\n/start /stop /help /signal /price /settings /history /stats /levels /lang"
@@ -86,7 +86,7 @@ TEXT: dict[str, dict[str, str]] = {
             "សញ្ញាអាចខុស។ កុំប្រថុយលុយដែលអ្នកមិនអាចចាញ់។"
         ),
         "welcome": (
-            "សូមស្វាគមន៍មកកាន់ GoldSight Alerts, {name}!\n\n"
+            "សូមស្វាគមន៍មកកាន់ Meas Pro Alerts, {name}!\n\n"
             "អ្នកនឹងទទួលសញ្ញា BUY/SELL ថ្មីទាំងអស់ និងការអាប់ដេត TP/SL "
             "ដោយស្វ័យប្រវត្តិ។\nប្រើ /settings ដើម្បីជ្រើសថ្នាក់ ក្របខណ្ឌពេលវេលា និងភាសា។\n\n"
             "ពាក្យបញ្ជា៖\n/start /stop /help /signal /price /settings /history /stats /levels /lang"

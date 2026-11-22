@@ -1,0 +1,122 @@
+# Meas Pro concept registry.
+# Every concept is a plugin: metadata here is declarative; detection lives in the
+# family module wrapped by app.concepts.base.register. Fields:
+#   family, description, enabled, weight, min_timeframe, regimes, sessions
+# Empty regimes/sessions = allowed everywhere. Weights are cross-checked against
+# concept_weights.yaml (the confluence scorer still reads that file).
+defaults:
+  enabled: true
+  min_timeframe: 15m
+  regimes: []
+  sessions: []
+
+concepts:
+  # --- structure ---------------------------------------------------------
+  swing_high: {family: structure, weight: 0.3, min_timeframe: 15m, description: "Causal confirmed swing high pivot"}
+  swing_low: {family: structure, weight: 0.3, min_timeframe: 15m, description: "Causal confirmed swing low pivot"}
+  trend: {family: structure, weight: 1.3, min_timeframe: 15m, description: "Higher-highs/higher-lows or lower-highs/lower-lows sequence"}
+  bos: {family: structure, weight: 1.3, min_timeframe: 15m, description: "Break of structure"}
+  choch: {family: structure, weight: 1.6, min_timeframe: 15m, description: "Change of character"}
+  mss: {family: structure, weight: 1.8, min_timeframe: 15m, description: "Market structure shift with displacement"}
+  internal_structure: {family: structure, weight: 0.6, min_timeframe: 15m, description: "Internal (lower timeframe) structure breaks"}
+  external_structure: {family: structure, weight: 1.0, min_timeframe: 15m, description: "External (higher timeframe) structure breaks"}
+  # --- smart money / ICT -------------------------------------------------
+  fvg: {family: smc, weight: 1.4, min_timeframe: 15m, description: "Fair value gap / imbalance"}
+  ifvg: {family: smc, weight: 1.5, min_timeframe: 15m, description: "Inverted fair value gap"}
+  order_block: {family: smc, weight: 1.5, min_timeframe: 15m, description: "Bullish/bearish order block zone"}
+  breaker_block: {family: smc, weight: 1.1, min_timeframe: 15m, description: "Broken order block flipped to opposition"}
+  mitigation_block: {family: smc, weight: 0.8, min_timeframe: 15m, description: "Order block after a clear exit displacement"}
+  equal_highs: {family: smc, weight: 0.7, min_timeframe: 15m, description: "Relative equal highs / buy-side liquidity"}
+  equal_lows: {family: smc, weight: 0.7, min_timeframe: 15m, description: "Relative equal lows / sell-side liquidity"}
+  liquidity_sweep: {family: smc, weight: 1.6, min_timeframe: 15m, description: "Stop run of a recorded liquidity level"}
+  displacement: {family: smc, weight: 1.0, min_timeframe: 15m, description: "Large body with small wicks versus ATR"}
+  killzone: {family: smc, weight: 0.5, min_timeframe: 15m, description: "London/New York killzone context"}
+  power_of_three: {family: smc, weight: 0.8, min_timeframe: 15m, description: "Accumulation-manipulation-distribution per day"}
+  judas_swing: {family: smc, weight: 0.9, min_timeframe: 15m, description: "False break of the day open before reversal"}
+  premium_discount: {family: smc, weight: 1.2, min_timeframe: 15m, description: "Dealing range premium/discount location"}
+  ote: {family: smc, weight: 1.0, min_timeframe: 15m, description: "Optimal trade entry 62-79% retracement"}
+  dealing_range: {family: smc, weight: 0.5, min_timeframe: 15m, description: "Active higher-timeframe dealing range"}
+  daily_open: {family: smc, weight: 0.3, min_timeframe: 15m, description: "Daily open reference"}
+  midnight_open: {family: smc, weight: 0.3, min_timeframe: 15m, description: "Midnight open reference"}
+  pdh: {family: smc, weight: 0.5, min_timeframe: 15m, description: "Previous day high liquidity"}
+  pdl: {family: smc, weight: 0.5, min_timeframe: 15m, description: "Previous day low liquidity"}
+  pwh: {family: smc, weight: 0.6, min_timeframe: 15m, description: "Previous week high liquidity"}
+  pwl: {family: smc, weight: 0.6, min_timeframe: 15m, description: "Previous week low liquidity"}
+  session_high: {family: smc, weight: 0.4, min_timeframe: 15m, description: "Session high liquidity"}
+  session_low: {family: smc, weight: 0.4, min_timeframe: 15m, description: "Session low liquidity"}
+  smt_divergence: {family: smc, weight: 1.2, min_timeframe: 1h, required_data: [dxy_df], description: "SMT divergence versus DXY"}
+  # --- classic -----------------------------------------------------------
+  sr_zone: {family: classic, weight: 0.9, min_timeframe: 15m, description: "Support/resistance zone from pivots"}
+  supply_demand: {family: classic, weight: 0.8, min_timeframe: 15m, description: "Supply and demand zones"}
+  trendline: {family: classic, weight: 0.8, min_timeframe: 15m, description: "Pivot-anchored trendline"}
+  channel: {family: classic, weight: 0.7, min_timeframe: 15m, description: "Parallel price channel"}
+  breakout: {family: classic, weight: 1.1, min_timeframe: 15m, description: "Range breakout"}
+  retest: {family: classic, weight: 0.9, min_timeframe: 15m, description: "Retest of a broken level"}
+  ema_cross: {family: classic, weight: 1.0, min_timeframe: 15m, description: "EMA crossover"}
+  price_vs_ema: {family: classic, weight: 0.7, min_timeframe: 15m, description: "Price relative to EMA stack"}
+  rsi_signal: {family: classic, weight: 0.4, min_timeframe: 15m, description: "RSI overbought/oversold and slope"}
+  rsi_divergence: {family: classic, weight: 1.0, min_timeframe: 15m, description: "RSI divergence at pivots"}
+  macd_cross: {family: classic, weight: 0.7, min_timeframe: 15m, description: "MACD signal-line cross"}
+  macd_divergence: {family: classic, weight: 0.9, min_timeframe: 15m, description: "MACD divergence at pivots"}
+  stochastic: {family: classic, weight: 0.3, min_timeframe: 15m, description: "Stochastic oscillator state"}
+  bollinger_squeeze: {family: classic, weight: 0.4, min_timeframe: 15m, description: "Bollinger band compression"}
+  bollinger_expansion: {family: classic, weight: 0.6, min_timeframe: 15m, description: "Bollinger band expansion"}
+  atr_volatility: {family: classic, weight: 0.2, min_timeframe: 15m, description: "ATR volatility regime"}
+  adx_trend_strength: {family: classic, weight: 0.6, min_timeframe: 15m, description: "ADX trend strength"}
+  fibonacci: {family: classic, weight: 0.6, min_timeframe: 15m, description: "Fibonacci retracement levels"}
+  pivot_points: {family: classic, weight: 0.5, min_timeframe: 15m, description: "Daily pivot points"}
+  vwap: {family: classic, weight: 0.6, min_timeframe: 15m, description: "Session VWAP"}
+  anchored_vwap: {family: classic, weight: 0.7, min_timeframe: 15m, description: "Anchored VWAP from a pivot"}
+  volume_profile: {family: classic, weight: 0.6, min_timeframe: 15m, description: "Rolling volume profile POC/value area"}
+  ichimoku: {family: classic, weight: 0.6, min_timeframe: 1h, description: "Ichimoku cloud state"}
+  market_regime: {family: classic, weight: 1.1, min_timeframe: 15m, description: "Trending/ranging regime classification"}
+  # --- price action ------------------------------------------------------
+  engulfing: {family: price_action, weight: 0.7, min_timeframe: 15m, description: "Bullish/bearish engulfing candle"}
+  pin_bar: {family: price_action, weight: 0.7, min_timeframe: 15m, description: "Long-wick rejection candle"}
+  doji: {family: price_action, weight: 0.2, min_timeframe: 15m, description: "Indecision doji"}
+  morning_star: {family: price_action, weight: 0.9, min_timeframe: 15m, description: "Morning star reversal"}
+  evening_star: {family: price_action, weight: 0.9, min_timeframe: 15m, description: "Evening star reversal"}
+  inside_bar: {family: price_action, weight: 0.5, min_timeframe: 15m, description: "Inside bar compression"}
+  outside_bar: {family: price_action, weight: 0.5, min_timeframe: 15m, description: "Outside bar expansion"}
+  three_soldiers: {family: price_action, weight: 0.8, min_timeframe: 15m, description: "Three white soldiers"}
+  three_crows: {family: price_action, weight: 0.8, min_timeframe: 15m, description: "Three black crows"}
+  double_bottom: {family: price_action, weight: 1.0, min_timeframe: 15m, description: "Double bottom reversal"}
+  double_top: {family: price_action, weight: 1.0, min_timeframe: 15m, description: "Double top reversal"}
+  head_shoulders: {family: price_action, weight: 1.1, min_timeframe: 1h, description: "Head and shoulders"}
+  inverse_head_shoulders: {family: price_action, weight: 1.1, min_timeframe: 1h, description: "Inverse head and shoulders"}
+  triangle: {family: price_action, weight: 0.7, min_timeframe: 15m, description: "Converging triangle"}
+  wedge: {family: price_action, weight: 0.7, min_timeframe: 15m, description: "Rising/falling wedge"}
+  flag: {family: price_action, weight: 0.7, min_timeframe: 15m, description: "Flag/pennant continuation"}
+  range_breakout: {family: price_action, weight: 0.9, min_timeframe: 15m, description: "Range edge rejection and break"}
+  # --- multi-timeframe ---------------------------------------------------
+  mtf_bias: {family: mtf, weight: 1.8, min_timeframe: 15m, description: "Top-down 1D/4h/1h/15m bias"}
+  htf_veto: {family: mtf, weight: 2.0, min_timeframe: 15m, description: "Higher-timeframe conflict veto"}
+  htf_level: {family: mtf, weight: 0.8, min_timeframe: 15m, description: "Higher-timeframe level projected down"}
+  ltf_entry_confirmation: {family: mtf, weight: 1.0, min_timeframe: 15m, description: "15m confirmation of a 1h setup"}
+  # --- macro / intermarket -----------------------------------------------
+  dxy_correlation: {family: macro, weight: 1.1, min_timeframe: 1h, required_data: [dxy_df], description: "DXY inverse correlation"}
+  us10y_correlation: {family: macro, weight: 1.0, min_timeframe: 1h, required_data: [us10y_df], description: "US10Y yield inverse correlation"}
+  real_yield_proxy: {family: macro, weight: 0.9, min_timeframe: 15m, description: "Real yield proxy from nominal minus CPI"}
+  risk_regime: {family: macro, weight: 0.6, min_timeframe: 15m, required_data: [spx_df], description: "SPX risk-on/risk-off context"}
+  news_sentiment: {family: macro, weight: 0.7, min_timeframe: 1h, required_data: [news], description: "Gold news sentiment"}
+  event_risk: {family: macro, weight: 1.5, min_timeframe: 15m, required_data: [events], description: "High-impact event blackout"}
+  macro_regime: {family: macro, weight: 1.2, min_timeframe: 1h, description: "Aggregate macro bias"}
+  # --- advanced ----------------------------------------------------------
+  wyckoff_phase: {family: advanced, weight: 0.0, min_timeframe: 1h, description: "Wyckoff PS/SC/AR/ST/Spring/SOS/UTAD"}
+  elliott_count: {family: advanced, weight: 0.1, min_timeframe: 1h, description: "Low-weight Elliott impulse/ABC count"}
+  market_profile: {family: advanced, weight: 0.25, min_timeframe: 1h, description: "POC and value area"}
+  naked_poc: {family: advanced, weight: 0.2, min_timeframe: 1h, description: "Unrevisited prior POC"}
+  value_acceptance: {family: advanced, weight: 0.25, min_timeframe: 1h, description: "Acceptance versus rejection of value"}
+  initial_balance: {family: advanced, weight: 0.2, min_timeframe: 15m, description: "First-hour initial balance"}
+  order_flow_delta: {family: advanced, weight: 0.1, min_timeframe: 15m, description: "OHLCV-estimated bar delta"}
+  volume_spike: {family: advanced, weight: 0.35, min_timeframe: 15m, description: "Volume spike versus average"}
+  absorption: {family: advanced, weight: 0.45, min_timeframe: 15m, description: "Effort without result"}
+  exhaustion: {family: advanced, weight: 0.0, min_timeframe: 15m, description: "Volume/divergence exhaustion"}
+  harmonic_pattern: {family: advanced, weight: 0.1, min_timeframe: 1h, description: "Gartley/Bat/Butterfly/Crab"}
+  zone_quality: {family: advanced, weight: 0.45, min_timeframe: 15m, description: "Zone freshness and test count"}
+  false_breakout: {family: advanced, weight: 0.0, min_timeframe: 15m, description: "Failed break / fakeout"}
+  breakout_retest: {family: advanced, weight: 0.25, min_timeframe: 15m, description: "Breakout followed by successful retest"}
+  volatility_squeeze: {family: advanced, weight: 0.15, min_timeframe: 15m, description: "ATR/Bollinger compression"}
+  nr7: {family: advanced, weight: 0.15, min_timeframe: 15m, description: "Narrowest range in seven bars"}
+  inside_bar_cluster: {family: advanced, weight: 0.1, min_timeframe: 15m, description: "Consecutive inside bars"}
+  session_statistics: {family: advanced, weight: 0.2, min_timeframe: 15m, description: "Session/hour range statistics"}

@@ -120,6 +120,70 @@ class TwelveDataProvider:
         return out
 
 
+class OandaProvider:
+    """OANDA practice spot XAU/USD candles with bid/ask/mid components."""
+
+    name = "oanda"
+
+    def available(self) -> bool:
+        return bool(config.OANDA_API_TOKEN)
+
+    def supports(self, ticker: str) -> bool:
+        return self.available() and ticker in (
+            config.GOLD_TICKER, "XAUUSD", "XAU/USD",
+        )
+
+    def fetch(self, ticker: str, timeframe: str) -> pd.DataFrame:
+        if not self.available():
+            raise RuntimeError("OANDA_API_TOKEN is not configured")
+        granularity = {"15m": "M15", "1h": "H1", "4h": "H4", "1D": "D"}.get(timeframe)
+        if not granularity:
+            raise RuntimeError(f"OANDA does not support timeframe {timeframe}")
+        base_url = config.OANDA_API_BASE_URL.rstrip("/")
+        instrument = config.OANDA_GOLD_INSTRUMENT
+        url = f"{base_url}/v3/instruments/{instrument}/candles"
+        params = {
+            "granularity": granularity,
+            "count": OUTPUT_SIZES.get(timeframe, 500),
+            "price": config.CANDLE_PRICE_SIDE.upper(),
+        }
+        resp = httpx.get(
+            url,
+            params=params,
+            timeout=10.0,
+            headers={"Authorization": f"Bearer {config.OANDA_API_TOKEN}"},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = payload.get("candles") or []
+        if not rows:
+            raise RuntimeError("OANDA returned no XAU/USD candles")
+
+        side = config.CANDLE_PRICE_SIDE
+        records: list[dict[str, Any]] = []
+        for candle in rows:
+            if not candle.get("complete", True) and candle is rows[-1]:
+                continue
+            values = candle.get(side) or candle.get("mid") or {}
+            record = {
+                "Date": pd.to_datetime(candle["time"], utc=True),
+                "Open": values.get("o"),
+                "High": values.get("h"),
+                "Low": values.get("l"),
+                "Close": values.get("c"),
+                "Volume": candle.get("volume", 0),
+            }
+            records.append(record)
+        out = finalize(pd.DataFrame(records).set_index("Date"))
+        if out.empty:
+            raise RuntimeError("OANDA returned no usable XAU/USD candles")
+        logger.info(
+            "OANDA returned %d spot XAU/USD %s bars using %s",
+            len(out), timeframe, side,
+        )
+        return out
+
+
 class YFinanceProvider:
     """Fallback source: Yahoo Finance spot XAU/USD, then COMEX gold futures."""
 
@@ -177,7 +241,7 @@ class YFinanceProvider:
     def fetch(self, ticker: str, timeframe: str) -> pd.DataFrame:
         candidates = [ticker]
         if ticker in (config.GOLD_TICKER, config.GOLD_FALLBACK_TICKER):
-            candidates = [config.GOLD_TICKER, config.GOLD_FALLBACK_TICKER]
+            candidates = [config.GOLD_TICKER]
 
         last_exc: Exception | None = None
         for tk in candidates:
@@ -242,7 +306,7 @@ class KrakenGoldProvider:
     name = "kraken-xaut"
 
     def supports(self, ticker: str) -> bool:
-        return ticker in (config.GOLD_TICKER, config.GOLD_FALLBACK_TICKER)
+        return False
 
     def fetch(self, ticker: str, timeframe: str) -> pd.DataFrame:
         if ticker not in (config.GOLD_TICKER, config.GOLD_FALLBACK_TICKER):
@@ -273,7 +337,7 @@ class KrakenGoldProvider:
 
 PROVIDERS = (
     TwelveDataProvider(),
-    KrakenGoldProvider(),
+    OandaProvider(),
     YahooChartProvider(),
     YFinanceProvider(),
 )

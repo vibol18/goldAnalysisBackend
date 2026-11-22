@@ -20,8 +20,10 @@ from app.concepts.base import (
     Concept,
     ensure_frame,
     serialise,
+    session_of,
     unlimited_mode,
 )
+from app.concepts.registry import allows as registry_allows, infer_timeframe as infer_tf
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +47,8 @@ def load_families(force: bool = False) -> None:
 def detect_all(df: pd.DataFrame, context: dict[str, Any] | None = None,
                families: tuple[str, ...] | None = None,
                types: tuple[str, ...] | None = None,
-               unlimited: bool = False) -> list[Concept]:
+               unlimited: bool = False,
+               timeframe: str | None = None) -> list[Concept]:
     """Run every registered detector and return a flat concept list.
 
     ``context`` carries optional extra inputs (other timeframes, macro frames,
@@ -55,6 +58,11 @@ def detect_all(df: pd.DataFrame, context: dict[str, Any] | None = None,
     load_families()
     frame = ensure_frame(df)
     ctx = context or {}
+    tf = timeframe or ctx.get("timeframe") or infer_tf(frame)
+    regime = ctx.get("regime")
+    session = ctx.get("session")
+    if session is None and len(frame.index):
+        session = session_of(frame.index[-1])
     found: list[Concept] = []
     with unlimited_mode() if unlimited else _nullcontext():
         for name, fn in DETECTORS.items():
@@ -62,6 +70,8 @@ def detect_all(df: pd.DataFrame, context: dict[str, Any] | None = None,
             if families and category not in families:
                 continue
             if types and name not in types:
+                continue
+            if not registry_allows(name, tf, regime, session):
                 continue
             try:
                 params = inspect.signature(fn).parameters

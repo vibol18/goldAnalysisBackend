@@ -19,10 +19,7 @@ from app.concepts.base import (
     signed_body,
     swing_points,
 )
-
 TF_WEIGHTS = {"1d": 4.0, "4h": 2.5, "1h": 1.0, "15m": 0.5}
-
-
 def _normalise(frame: Any) -> pd.DataFrame | None:
     if not isinstance(frame, pd.DataFrame) or frame.empty:
         return None
@@ -65,8 +62,6 @@ def _truncate(frame: Any, ts: Any) -> pd.DataFrame | None:
     if out.empty:
         return None
     return out
-
-
 def _last_ts(frame: pd.DataFrame | None) -> Any:
     if frame is not None and isinstance(frame.index, pd.DatetimeIndex) and len(frame.index):
         return frame.index[-1]
@@ -86,7 +81,6 @@ def _atr_value(frame: pd.DataFrame) -> float:
         return value
     return max(abs(float(frame["Close"].iloc[-1])) * 0.001, 1e-9)
 
-
 def _structure_dir(frame: pd.DataFrame) -> str:
     pivots = swing_points(frame, lookback=2, confirm=1)
     lows = [p["price"] for p in pivots if p["kind"] == "low"][-2:]
@@ -96,8 +90,6 @@ def _structure_dir(frame: pd.DataFrame) -> str:
     if len(highs) == 2 and highs[-1] < highs[-2]:
         return "bearish"
     return "neutral"
-
-
 def _trend(frame: pd.DataFrame) -> tuple[str, float, float | None, float | None]:
     close = frame["Close"]
     if len(close) < 5:

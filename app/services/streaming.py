@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from app import config
-from app.services import chart_annotations, data, db, news
+from app.services import chart_annotations, data, db, news, price_service, prices, telegram_delivery
 
 logger = logging.getLogger(__name__)
 
@@ -264,6 +264,11 @@ def tick_event(frame: pd.DataFrame | None,
         if frame is not None and len(frame) >= 2 and "Close" in frame.columns:
             previous = _number(frame["Close"].iloc[-2])
         time_str = time_str or datetime.fromtimestamp(candle.time, timezone.utc).isoformat()
+    snapshot = prices.FEED.snapshot()
+    bid, ask = snapshot.get("bid"), snapshot.get("ask")
+    if bid is not None and ask is not None:
+        price = snapshot.get("price") if snapshot.get("price") is not None else bid
+        time_str = snapshot.get("time") or time_str
     if price is None:
         return None
     if change is None:
@@ -271,7 +276,11 @@ def tick_event(frame: pd.DataFrame | None,
     if change_pct is None:
         change_pct = change / previous * 100.0 if previous else 0.0
     return event("tick", price=float(price), change=float(change),
-                 change_pct=float(change_pct), time=str(time_str or _now_iso()))
+                 change_pct=float(change_pct), time=str(time_str or _now_iso()),
+                 bid=bid, ask=ask, spread=snapshot.get("spread"),
+                 source=snapshot.get("source"), price_state=snapshot.get("state"),
+                 age_seconds=snapshot.get("age_seconds"),
+                 reason=snapshot.get("reason"))
 
 
 def macro_event(overview: dict[str, Any] | None) -> dict[str, Any]:
@@ -323,6 +332,8 @@ def parse_signal(row: dict[str, Any]) -> dict[str, Any]:
         "take_profit3": _number(row.get("take_profit3")),
         "signal_time": str(row.get("signal_time") or row.get("created_at") or ""),
         "status": str(row.get("status") or "open"),
+        "hit": row.get("hit"),
+        "result_pct": _number(row.get("result_pct")),
         "explanation": explanation,
     }
 
@@ -356,6 +367,10 @@ def annotation_event(timeframe: str, entry: Any) -> dict[str, Any] | None:
 
 
 _LAST_STATUS: tuple[str, str | None, str | None] | None = None
+_LAST_PRICE_STATUS: tuple[Any, ...] | None = None
+_WATCHDOG_DOWN_SINCE: float | None = None
+_WATCHDOG_ALERTED = False
+_WATCHDOG_TASK: asyncio.Task | None = None
 
 
 def status_event(state: str, last_update: str | None = None,
@@ -373,6 +388,50 @@ def _emit_status(state: str, last_update: str | None = None,
     status = status_event(state, last_update, source)
     if status is not None:
         HUB.publish(status)
+
+
+def publish_price_status() -> dict[str, Any]:
+    """Broadcast the shared price-feed state only when it actually changes."""
+    global _LAST_PRICE_STATUS
+    snapshot = prices.FEED.snapshot()
+    key = (snapshot["state"], snapshot["source"], snapshot["time"],
+           snapshot.get("reason"))
+    if key != _LAST_PRICE_STATUS:
+        _LAST_PRICE_STATUS = key
+        HUB.publish(event("price_status", **snapshot))
+    return snapshot
+
+
+async def watchdog_loop() -> None:
+    """Check feed health every 5 s and alert admins after 2 min of downtime."""
+    global _WATCHDOG_DOWN_SINCE, _WATCHDOG_ALERTED, _task
+    while True:
+        try:
+            await asyncio.sleep(max(1.0, config.WATCHDOG_INTERVAL_SECONDS))
+            snapshot = prices.FEED.snapshot()
+            down = (snapshot["state"] == prices.STALE and
+                    bool(snapshot["market"]["open"]))
+            if _task is not None and _task.done():
+                logger.error("stream task died - restarting")
+                _task = asyncio.create_task(stream_loop(), name="goldsight-stream")
+            if down:
+                if _WATCHDOG_DOWN_SINCE is None:
+                    _WATCHDOG_DOWN_SINCE = time.time()
+                elapsed = time.time() - _WATCHDOG_DOWN_SINCE
+                if elapsed >= config.WATCHDOG_ALERT_SECONDS and not _WATCHDOG_ALERTED:
+                    _WATCHDOG_ALERTED = True
+                    reason = snapshot.get("reason") or "no tick received"
+                    logger.error("price feed down for %.0fs: %s", elapsed, reason)
+                    telegram_delivery.notify_admin(
+                        f"Meas Pro price feed DOWN for {elapsed:.0f}s "
+                        f"({snapshot['source']}): {reason}")
+            else:
+                _WATCHDOG_DOWN_SINCE = None
+                _WATCHDOG_ALERTED = False
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - watchdog must never die
+            logger.exception("watchdog cycle failed")
 
 
 _SEEN_SIGNALS: set[int] = set()
@@ -455,16 +514,27 @@ async def stream_cycle(background: bool = False) -> None:
     force = (started - _last_force_at) >= FORCE_REFRESH_SECONDS
     try:
         if force:
-            entry = await asyncio.to_thread(
-                data.get_ohlcv, config.GOLD_TICKER, "15m", True)
+            entry = await asyncio.to_thread(price_service.get_series, "15m", True)
             _last_force_at = time.monotonic()
         else:
-            entry = await asyncio.to_thread(
-                data.get_ohlcv, config.GOLD_TICKER, "15m")
+            entry = await asyncio.to_thread(price_service.get_series, "15m")
     except Exception:  # noqa: BLE001 - provider errors must not stop the loop
         logger.warning("stream OHLCV fetch failed", exc_info=True)
         _emit_status("stale")
     frame = getattr(entry, "df", None) if entry is not None else None
+    try:
+        from app.services.providers import get_live_gold_quote
+        spot_price, quote_time = await asyncio.to_thread(get_live_gold_quote)
+        spread = max(float(config.SPREAD_USD), 0.01)
+        bid = float(spot_price) - spread / 2.0
+        ask = float(spot_price) + spread / 2.0
+        prices.FEED.update(
+            "rest", bid, ask,
+            ts=datetime.now(timezone.utc).timestamp(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        prices.FEED.mark_error("rest", str(exc))
+        logger.debug("live XAU/USD REST quote failed: %s", exc)
     if frame is None or getattr(frame, "empty", True):
         _emit_status("stale", None, getattr(entry, "error", None))
     else:
@@ -477,6 +547,7 @@ async def stream_cycle(background: bool = False) -> None:
             for candle_event_ in candle_events(
                     timeframe, resample_frame(frame, timeframe)):
                 HUB.publish(candle_event_)
+    publish_price_status()
     if started - _last_overview_at >= MACRO_INTERVAL_SECONDS:
         _last_overview_at = started
         task = _run_side("macro", _background_overview())
@@ -518,17 +589,27 @@ async def stream_loop() -> None:
 
 
 async def start_streaming() -> asyncio.Task | None:
-    """Start the single background stream task (idempotent)."""
-    global _task
+    """Start the single background stream task and the health watchdog."""
+    global _task, _WATCHDOG_TASK
     if _task is not None and not _task.done():
         return _task
     _task = asyncio.create_task(stream_loop(), name="goldsight-stream")
+    if _WATCHDOG_TASK is None or _WATCHDOG_TASK.done():
+        _WATCHDOG_TASK = asyncio.create_task(watchdog_loop(), name="goldsight-watchdog")
     return _task
 
 
 async def stop_streaming() -> None:
-    """Cancel the background stream task (idempotent)."""
-    global _task
+    """Cancel the background stream task and watchdog (idempotent)."""
+    global _task, _WATCHDOG_TASK
+    watchdog = _WATCHDOG_TASK
+    _WATCHDOG_TASK = None
+    if watchdog is not None:
+        watchdog.cancel()
+        try:
+            await watchdog
+        except asyncio.CancelledError:
+            pass
     task = _task
     _task = None
     if task is None:

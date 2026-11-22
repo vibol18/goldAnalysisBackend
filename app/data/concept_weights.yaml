@@ -1,4 +1,4 @@
-# GoldSight concept weights — edit freely, restart the backend to apply.
+# Meas Pro concept weights — edit freely, restart the backend to apply.
 # Weight = base contribution of a concept before strength scaling and recency decay.
 # Category caps stop one indicator family from dominating the confluence score.
 

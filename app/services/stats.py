@@ -13,7 +13,7 @@ import numpy as np
 
 from app.concepts.base import session_of
 from app.services import backtest as backtest_service
-from app.services import db
+from app.services import db, price_service
 
 logger = logging.getLogger(__name__)
 
@@ -158,4 +158,4 @@ def build_results(years: int = 5) -> dict[str, Any]:
 def _frame():
     from app import config
     from app.services import data
-    return data.get_ohlcv(config.GOLD_TICKER, "1h").df
+    return price_service.get_series("1h").df

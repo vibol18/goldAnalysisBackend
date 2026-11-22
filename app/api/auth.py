@@ -196,7 +196,7 @@ def totp_setup(user: dict = Depends(auth.current_user)) -> dict[str, str]:
              auth._iso(auth._now())),
         )
         conn.commit()
-    uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name="GoldSight")
+    uri = pyotp.TOTP(secret).provisioning_uri(name=user["email"], issuer_name="Meas Pro")
     return {"secret": secret, "uri": uri}
 
 

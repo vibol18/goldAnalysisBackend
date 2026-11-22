@@ -1,1 +1,1 @@
-"""GoldSight backend package."""
+"""Meas Pro backend package."""

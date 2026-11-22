@@ -11,12 +11,20 @@ from fastapi.responses import StreamingResponse
 
 from app import config
 from app.services import auth
-from app.services import chat, data, db, news, risk as risk_service, stats as stats_service
+from app.services import chat, data, db, news, price_service, risk as risk_service, stats as stats_service
 from app.services.backtest import run_backtest
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["backtest", "chat", "risk", "news"])
+
+
+@router.get("/debug/price")
+def debug_price() -> dict[str, Any]:
+    """Latest price, every configured source and the exact bridge diagnosis."""
+    payload = price_service.diagnostics()
+    payload["verification"] = price_service.verification()
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -26,7 +34,7 @@ router = APIRouter(prefix="/api", tags=["backtest", "chat", "risk", "news"])
 def backtest(years: int = config.BACKTEST_YEARS) -> dict[str, Any]:
     """Run (or serve cached) multi-year backtest of the strategy."""
     try:
-        gold = data.get_ohlcv(config.GOLD_TICKER, "1D").df
+        gold = price_service.get_series("1D").df
         dxy = data.get_ohlcv(config.DXY_TICKER, "1D").df
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(503, f"market data unavailable: {exc}") from exc
@@ -172,7 +180,7 @@ def _build_snapshot() -> dict[str, Any]:
         "concepts": [], "confluence": None, "signal_explanation": None,
     }
     try:
-        entry = data.get_ohlcv(config.GOLD_TICKER, "1h")
+        entry = price_service.get_series("1h")
         from app.services.concept_context import build_context
         from app.services.signal_engine import generate_signal
         context = build_context("1h")
@@ -191,7 +199,7 @@ def _build_snapshot() -> dict[str, Any]:
     try:
         ind = None
         from app.services.indicators import add_all
-        df = add_all(data.get_ohlcv(config.GOLD_TICKER, "1D").df)
+        df = add_all(price_service.get_series("1D").df)
         last = df.iloc[-1]
         ind = {
             "rsi": float(last["rsi"]) if last.get("rsi") == last.get("rsi") else None,

@@ -11,12 +11,12 @@ import numpy as np
 import pandas as pd
 
 from app import config
-from app.services import data as market_data
+from app.services import price_service
 
 
 def get_eval_data(years: int = 3) -> pd.DataFrame:
     """Real daily XAU/USD with at least one year of warmup."""
-    frame = market_data.get_ohlcv(config.GOLD_TICKER, "1D").df
+    frame = price_service.get_series("1D").df
     if frame is None or frame.empty:
         raise RuntimeError("real gold data unavailable")
     frame = frame.copy()

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app import config
-from app.services import data, db
+from app.services import data, db, price_service
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def build_context(timeframe: str = "1h", include_mtf: bool = True,
             if tf == timeframe:
                 continue
             try:
-                frame = data.get_ohlcv(config.GOLD_TICKER, tf).df
+                frame = price_service.get_series(tf).df
                 if not frame.empty:
                     ctx[key] = frame
             except Exception as exc:  # noqa: BLE001
